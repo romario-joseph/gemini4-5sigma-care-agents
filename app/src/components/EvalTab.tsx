@@ -1,7 +1,8 @@
 import React, { useRef, useState } from 'react';
-import { motion } from 'motion/react';
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   Download,
   FileAudio,
   FileImage,
@@ -13,6 +14,7 @@ import {
   Plus,
   Repeat,
   RotateCcw,
+  ShieldCheck,
   Square,
   Trash2,
   X,
@@ -24,6 +26,7 @@ import type {
   EvalRunHistoryEntry,
   FailureFixEntry,
   LoadedMediaFile,
+  StressTestRunResponse,
   TestCase,
 } from '../types.ts';
 import {
@@ -55,31 +58,25 @@ interface EvalTabProps {
   onStartEval: (passes: 1 | 2) => void;
   onStopEval: () => void;
   onResetDefaults: () => void;
+  stressTestResult: StressTestRunResponse | null;
+  isRunningStressTest: boolean;
+  stressTestError: string | null;
+  onRunStressTest: () => void;
 }
 
 function inferMediaFromFile(file: File): { mode: 'photo' | 'voice'; mimeType: string } | null {
   const nameLower = file.name.toLowerCase();
   const typeLower = (file.type || '').toLowerCase();
 
-  if (
-    typeLower.startsWith('image/') ||
-    /\.(jpg|jpeg|png|webp|heic|heif)$/.test(nameLower)
-  ) {
+  if (typeLower.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic|heif)$/.test(nameLower)) {
     const ext = nameLower.split('.').pop();
     const mime =
       typeLower ||
-      (ext === 'png'
-        ? 'image/png'
-        : ext === 'webp'
-          ? 'image/webp'
-          : 'image/jpeg');
+      (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
     return { mode: 'photo', mimeType: mime };
   }
 
-  if (
-    typeLower.startsWith('audio/') ||
-    /\.(m4a|mp3|wav|webm|ogg|aac)$/.test(nameLower)
-  ) {
+  if (typeLower.startsWith('audio/') || /\.(m4a|mp3|wav|webm|ogg|aac)$/.test(nameLower)) {
     const ext = nameLower.split('.').pop();
     const mime =
       typeLower ||
@@ -117,6 +114,16 @@ function downloadTextFile(filename: string, content: string, mimeType: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+function getMetricValue(
+  metrics: EvalMetricRow[],
+  key: string,
+  side: 'careAgents' | 'singleCall',
+  fallback: string
+): string {
+  const row = metrics.find((m) => m.key === key);
+  return row ? row[side] : fallback;
+}
+
 export const EvalTab: React.FC<EvalTabProps> = ({
   metrics,
   onUpdateMetrics,
@@ -139,7 +146,12 @@ export const EvalTab: React.FC<EvalTabProps> = ({
   onStartEval,
   onStopEval,
   onResetDefaults,
+  stressTestResult,
+  isRunningStressTest,
+  stressTestError,
+  onRunStressTest,
 }) => {
+  const [showAllResults, setShowAllResults] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [draftMetrics, setDraftMetrics] = useState<EvalMetricRow[]>(metrics);
   const [exportNote, setExportNote] = useState<string | null>(null);
@@ -204,9 +216,7 @@ export const EvalTab: React.FC<EvalTabProps> = ({
     }
 
     onUpdateLoadedMedia(updates);
-    if (mediaInputRef.current) {
-      mediaInputRef.current.value = '';
-    }
+    if (mediaInputRef.current) mediaInputRef.current.value = '';
   };
 
   const handleRemoveMedia = (caseId: string) => {
@@ -215,26 +225,17 @@ export const EvalTab: React.FC<EvalTabProps> = ({
     onUpdateLoadedMedia(next);
   };
 
-  const handleRunEval = (passes: 1 | 2) => {
-    setExportNote(null);
-    onStartEval(passes);
-  };
-
-  const handleStopEval = () => {
-    onStopEval();
-  };
-
   const handleExportResults = () => {
     const orderedResults = TEST_CASES.map((tc) => caseResults[tc.id]).filter(
       (r): r is EvalCaseResult => Boolean(r)
     );
-    const csv = buildCsvExport(metrics, orderedResults);
-    const md = buildMarkdownExport(metrics, orderedResults);
+    const csv = buildCsvExport(metrics, orderedResults, stressTestResult);
+    const md = buildMarkdownExport(metrics, orderedResults, stressTestResult);
     downloadTextFile('care-agents-eval.csv', csv, 'text/csv;charset=utf-8');
     window.setTimeout(() => {
       downloadTextFile('care-agents-eval.md', md, 'text/markdown;charset=utf-8');
     }, 150);
-    setExportNote('Downloaded care-agents-eval.csv and care-agents-eval.md');
+    setExportNote('Exported care-agents-eval.csv and care-agents-eval.md');
   };
 
   const handleAddFailureFix = (e: React.FormEvent) => {
@@ -255,35 +256,42 @@ export const EvalTab: React.FC<EvalTabProps> = ({
     setAfterScore('');
   };
 
-  const handleDeleteFix = (id: string) => {
-    onUpdateFailuresAndFixes(failuresAndFixes.filter((f) => f.id !== id));
-  };
-
   const loadedCount = Object.keys(loadedMedia).length;
-  const progressPct = totalSteps > 0 ? Math.min(100, Math.round((completedCount / totalSteps) * 100)) : 0;
+  const progressPct =
+    totalSteps > 0 ? Math.min(100, Math.round((completedCount / totalSteps) * 100)) : 0;
   const orderedCaseResults = Object.values(caseResults);
   const formatBreakdown = aggregateFormatBreakdown(orderedCaseResults);
 
+  // 4 Headline KPI Numbers
+  const needsFoundCare = getMetricValue(metrics, 'needs_found', 'careAgents', 'Pending');
+  const needsFoundSingle = getMetricValue(metrics, 'needs_found', 'singleCall', 'Pending');
+
+  const unsupportedCare = getMetricValue(metrics, 'unsupported_referrals', 'careAgents', '0%');
+  const unsupportedSingle = getMetricValue(metrics, 'unsupported_referrals', 'singleCall', 'Pending');
+
+  const officialDbCare = getMetricValue(metrics, 'official_db_found', 'careAgents', 'Pending');
+  const officialDbSingle = getMetricValue(metrics, 'official_db_found', 'singleCall', 'Pending');
+
+  const stressCaughtValue = stressTestResult
+    ? `${stressTestResult.caughtCount} / ${stressTestResult.plantedTotal}`
+    : 'Not run';
+  const stressSubtext = stressTestResult
+    ? `${stressTestResult.controlsKeptCount}/${stressTestResult.controlsTotal} controls kept`
+    : '15 planted errors, 5 controls';
+
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      className="p-3 space-y-4"
-    >
-      {/* Benchmark Header & Controls */}
-      <section>
-        <div className="ehr-panel p-3 flex flex-wrap items-center justify-between gap-3">
+    <div className="mx-auto max-w-[1380px] px-4 sm:px-6 py-6 space-y-6">
+      {/* Headline Results Card First */}
+      <section className="calm-card p-6 space-y-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-[15px] font-bold text-[#1F3A5F]">
-              Evaluation Benchmark (20 NYC Cases)
-            </h1>
-            <p className="mt-0.5 text-[12px] text-slate-600">
-              Single unverified call vs. Care Agents across text, handwritten photo, and voice intake cases.
+            <h1 className="calm-heading">Care Agents vs single call</h1>
+            <p className="mt-1 text-[14px] text-slate-600">
+              20 NYC intake cases across text, photo, and voice, plus self-check stress testing.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
             <input
               ref={mediaInputRef}
               type="file"
@@ -298,44 +306,65 @@ export const EvalTab: React.FC<EvalTabProps> = ({
               disabled={isRunningEval}
               className="ehr-btn-secondary"
             >
-              <FolderOpen className="h-3.5 w-3.5" />
-              Load test media{loadedCount > 0 ? ` (${loadedCount})` : ''}
+              <FolderOpen className="h-4 w-4" />
+              Load media{loadedCount > 0 ? ` (${loadedCount})` : ''}
             </button>
 
             <button
               type="button"
-              onClick={handleExportResults}
+              onClick={onRunStressTest}
+              disabled={isRunningStressTest || isRunningEval}
               className="ehr-btn-secondary"
             >
-              <Download className="h-3.5 w-3.5" />
-              Export results
+              {isRunningStressTest ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Testing...
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="h-4 w-4 text-[#2B6CB0]" />
+                  Stress test
+                </>
+              )}
+            </button>
+
+            <button type="button" onClick={handleExportResults} className="ehr-btn-secondary">
+              <Download className="h-4 w-4" />
+              Export
             </button>
 
             {isRunningEval ? (
               <button
                 type="button"
-                onClick={handleStopEval}
-                className="inline-flex items-center gap-1.5 rounded-[3px] bg-[#C53030] border border-[#9B2C2C] px-3 py-1 text-[12px] font-semibold text-white hover:bg-[#9B2C2C] whitespace-nowrap"
+                onClick={onStopEval}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#C53030] px-4 py-2 text-[14px] font-semibold text-white hover:bg-[#9B2C2C]"
               >
-                <Square className="h-3 w-3 fill-current" />
-                Stop eval
+                <Square className="h-3.5 w-3.5 fill-current" />
+                Stop
               </button>
             ) : (
               <>
                 <button
                   type="button"
-                  onClick={() => void handleRunEval(2)}
+                  onClick={() => {
+                    setExportNote(null);
+                    onStartEval(2);
+                  }}
                   className="ehr-btn-secondary"
                 >
-                  <Repeat className="h-3.5 w-3.5 text-[#2B6CB0]" />
-                  Run 2 times
+                  <Repeat className="h-4 w-4 text-[#2B6CB0]" />
+                  Run 2x
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handleRunEval(1)}
+                  onClick={() => {
+                    setExportNote(null);
+                    onStartEval(1);
+                  }}
                   className="ehr-btn-primary"
                 >
-                  <Play className="h-3.5 w-3.5 fill-current" />
+                  <Play className="h-4 w-4 fill-current" />
                   Run full eval
                 </button>
               </>
@@ -343,28 +372,70 @@ export const EvalTab: React.FC<EvalTabProps> = ({
           </div>
         </div>
 
+        {/* 4 Big Headline Numbers */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="soft-surface p-4">
+            <div className="text-[13px] font-medium text-slate-500">Needs found (F1)</div>
+            <div className="mt-1.5 text-[26px] font-semibold text-[#1F3A5F] tabular-nums leading-tight">
+              {needsFoundCare}
+            </div>
+            <div className="mt-1 text-[12.5px] text-slate-500 tabular-nums">
+              Single call: {needsFoundSingle}
+            </div>
+          </div>
+
+          <div className="soft-surface p-4">
+            <div className="text-[13px] font-medium text-slate-500">Unsupported referrals</div>
+            <div className="mt-1.5 text-[26px] font-semibold text-[#15803D] tabular-nums leading-tight">
+              {unsupportedCare}
+            </div>
+            <div className="mt-1 text-[12.5px] text-slate-500 tabular-nums">
+              Single call: {unsupportedSingle}
+            </div>
+          </div>
+
+          <div className="soft-surface p-4">
+            <div className="text-[13px] font-medium text-slate-500">Found in official NYC data</div>
+            <div className="mt-1.5 text-[26px] font-semibold text-[#2B6CB0] tabular-nums leading-tight">
+              {officialDbCare}
+            </div>
+            <div className="mt-1 text-[12.5px] text-slate-500 tabular-nums">
+              Single call: {officialDbSingle}
+            </div>
+          </div>
+
+          <div className="soft-surface p-4">
+            <div className="text-[13px] font-medium text-slate-500">Stress test caught</div>
+            <div className="mt-1.5 text-[26px] font-semibold text-[#15803D] tabular-nums leading-tight">
+              {stressCaughtValue}
+            </div>
+            <div className="mt-1 text-[12.5px] text-slate-500 tabular-nums">{stressSubtext}</div>
+          </div>
+        </div>
+
+        {/* Live Progress / Notices */}
         {exportNote ? (
-          <p className="mt-3 text-[13px] font-medium text-emerald-700">{exportNote}</p>
+          <p className="text-[13.5px] font-medium text-[#15803D]">{exportNote}</p>
         ) : null}
 
         {evalError ? (
-          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[13.5px] text-red-700">
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13.5px] text-[#C53030]">
             {evalError}
           </div>
         ) : null}
 
-        {/* Consistency Banner (after Run 2 times) */}
+        {stressTestError ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13.5px] text-[#C53030]">
+            {stressTestError}
+          </div>
+        ) : null}
+
         {consistencySummary ? (
-          <div className="mt-5 rounded-[16px] border border-emerald-200 bg-emerald-50/75 px-5 py-4 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-[14.5px] font-semibold text-emerald-950">
-                2-run consistency report
-              </h2>
-              <p className="text-[13.5px] text-emerald-800">
-                Same needs extracted across both runs: {consistencySummary.consistent} / {consistencySummary.total} cases ({consistencySummary.total > 0 ? Math.round((consistencySummary.consistent / consistencySummary.total) * 100) : 0}%).
-              </p>
-            </div>
-            <span className="font-mono text-[18px] font-bold text-emerald-800 tabular-nums">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center justify-between gap-4">
+            <span className="text-[14px] font-medium text-emerald-950">
+              2-run consistency: {consistencySummary.consistent} of {consistencySummary.total} cases matched
+            </span>
+            <span className="font-mono text-[16px] font-semibold text-[#15803D] tabular-nums">
               {consistencySummary.total > 0
                 ? `${Math.round((consistencySummary.consistent / consistencySummary.total) * 100)}%`
                 : 'N/A'}
@@ -372,452 +443,465 @@ export const EvalTab: React.FC<EvalTabProps> = ({
           </div>
         ) : null}
 
-        {/* Progress Bar */}
         {isRunningEval || completedCount > 0 ? (
-          <div className="mt-5 soft-surface p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
-              <div className="flex items-center gap-2 font-medium text-neutral-800">
+          <div className="soft-surface p-4 space-y-2">
+            <div className="flex items-center justify-between gap-2 text-[13.5px]">
+              <div className="flex items-center gap-2 font-medium text-slate-800">
                 {isRunningEval ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#0071E3]" />
+                  <Loader2 className="h-4 w-4 animate-spin text-[#2B6CB0]" />
                 ) : (
-                  <Check className="h-3.5 w-3.5 text-emerald-600" />
+                  <Check className="h-4 w-4 text-[#15803D]" />
                 )}
                 <span>
                   {isRunningEval
-                    ? `${runningTwoPass ? `Pass ${currentPass} of 2: ` : ''}Running 3 cases at a time (${completedCount} of ${totalSteps} completed)`
-                    : `Completed ${completedCount} of ${totalSteps} evaluations`}
+                    ? `${runningTwoPass ? `Pass ${currentPass} of 2: ` : ''}${completedCount} of ${totalSteps} completed`
+                    : `Completed ${completedCount} of ${totalSteps} cases`}
                 </span>
               </div>
-              <span className="font-mono text-neutral-600 tabular-nums">
+              <span className="font-mono text-[13px] text-slate-600 tabular-nums">
                 {(evalElapsedMs / 1000).toFixed(1)}s
               </span>
             </div>
-            <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-black/[0.08]">
+            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
               <div
-                className="h-full rounded-full bg-[#0071E3] transition-all duration-300"
+                className="h-full rounded-full bg-[#2B6CB0] transition-all duration-300"
                 style={{ width: `${progressPct}%` }}
               />
             </div>
           </div>
         ) : null}
 
-        {/* Main Comparison Table */}
-        <div className="mt-3 flex items-center justify-end gap-2">
-          {isEditing ? (
-            <>
-              <button
-                type="button"
-                onClick={resetDefaults}
-                className="ehr-btn-secondary"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Reset
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsEditing(false)}
-                className="ehr-btn-secondary"
-              >
-                <X className="h-3.5 w-3.5" />
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={saveEdits}
-                className="ehr-btn-primary"
-              >
-                <Check className="h-3.5 w-3.5" />
-                Save results
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={startEditing}
-              className="ehr-btn-secondary"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              Edit results
-            </button>
-          )}
-        </div>
-
-        <div className="mt-3 card-surface overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-black/[0.06] bg-[#F5F5F7]/70 text-[13px] font-semibold text-neutral-600">
-                  <th className="px-6 py-4">Metric</th>
-                  <th className="px-6 py-4">Single call</th>
-                  <th className="px-6 py-4 text-[#0071E3]">Care Agents</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-black/[0.06] text-[15px]">
-                {(isEditing ? draftMetrics : metrics).map((row, idx) => (
-                  <tr key={row.key} className="hover:bg-neutral-50/60 transition-colors">
-                    <td className="px-6 py-3.5 font-medium text-neutral-900">{row.label}</td>
-                    <td className="px-6 py-3.5 font-mono text-[14px] text-neutral-600 tabular-nums">
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={row.singleCall}
-                          onChange={(e) => updateCell(idx, 'singleCall', e.target.value)}
-                          className="w-full max-w-[220px] rounded-lg border border-black/[0.15] bg-white px-3 py-1.5 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
-                        />
-                      ) : (
-                        row.singleCall
-                      )}
-                    </td>
-                    <td className="px-6 py-3.5 font-mono text-[14px] font-semibold text-neutral-900 tabular-nums">
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={row.careAgents}
-                          onChange={(e) => updateCell(idx, 'careAgents', e.target.value)}
-                          className="w-full max-w-[220px] rounded-lg border border-[#0071E3]/40 bg-white px-3 py-1.5 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
-                        />
-                      ) : (
-                        row.careAgents
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="border-t border-black/[0.06] bg-[#F5F5F7]/40 px-6 py-3 text-[12.5px] text-neutral-500">
-            Click &ldquo;Run full eval&rdquo; to evaluate all 20 cases or &ldquo;Run 2 times&rdquo; to measure cross-run consistency.
-          </div>
+        {/* Toggle for Full Results */}
+        <div className="border-t border-slate-100 pt-4 flex items-center justify-between gap-4">
+          <span className="text-[13.5px] text-slate-500">
+            Full comparison table, stress test rows, trend chart, and C01 to C20 cases
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowAllResults((prev) => !prev)}
+            className="ehr-btn-secondary"
+            aria-expanded={showAllResults}
+          >
+            {showAllResults ? (
+              <>
+                <ChevronDown className="h-4 w-4" />
+                Hide results
+              </>
+            ) : (
+              <>
+                <ChevronRight className="h-4 w-4" />
+                See all results
+              </>
+            )}
+          </button>
         </div>
       </section>
 
-      {/* D3 Run History Trend Chart */}
-      <EvalTrendChart
-        runs={runHistory}
-        isRunningEval={isRunningEval}
-        onRunFullEval={() => void handleRunEval(1)}
-        onClearHistory={onClearRunHistory}
-      />
+      {/* Expandable Full Evaluation Details */}
+      {showAllResults ? (
+        <div className="space-y-6">
+          {/* Full Comparison Table */}
+          <section className="calm-card overflow-hidden">
+            <div className="ehr-section-header">
+              <span>Full comparison metrics</span>
+              <div className="flex items-center gap-2">
+                {isEditing ? (
+                  <>
+                    <button type="button" onClick={resetDefaults} className="ehr-btn-secondary py-1 px-2.5 text-[12.5px]">
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      Reset
+                    </button>
+                    <button type="button" onClick={() => setIsEditing(false)} className="ehr-btn-secondary py-1 px-2.5 text-[12.5px]">
+                      <X className="h-3.5 w-3.5" />
+                      Cancel
+                    </button>
+                    <button type="button" onClick={saveEdits} className="ehr-btn-primary py-1 px-3 text-[12.5px]">
+                      <Check className="h-3.5 w-3.5" />
+                      Save
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" onClick={startEditing} className="ehr-btn-secondary py-1 px-2.5 text-[12.5px]">
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </button>
+                )}
+              </div>
+            </div>
 
-      {/* Breakdown by Input Type (Text / Photo / Voice) */}
-      <section>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-[22px] font-semibold tracking-tight text-neutral-900">
-            Breakdown by input type
-          </h2>
-          <span className="text-[13px] text-neutral-500">
-            Text, handwritten photo, and voice note accuracy and unsupported rate
-          </span>
-        </div>
-
-        <div className="mt-4 card-surface overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-black/[0.06] bg-[#F5F5F7]/70 text-[13px] font-semibold text-neutral-600">
-                  <th className="px-6 py-3.5">Input type</th>
-                  <th className="px-6 py-3.5">Cases</th>
-                  <th className="px-6 py-3.5">Single call F1</th>
-                  <th className="px-6 py-3.5">Single call unsupported</th>
-                  <th className="px-6 py-3.5 text-[#0071E3]">Care Agents F1</th>
-                  <th className="px-6 py-3.5 text-[#0071E3]">Care Agents unsupported</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-black/[0.06] text-[14.5px]">
-                {formatBreakdown.map((row) => (
-                  <tr key={row.format} className="hover:bg-neutral-50/60">
-                    <td className="px-6 py-3.5 font-semibold text-neutral-900">{row.label}</td>
-                    <td className="px-6 py-3.5 font-mono text-neutral-600 tabular-nums">
-                      {row.count > 0
-                        ? row.count
-                        : `${TEST_CASES.filter((t) => t.expectedFormat === row.format).length} queued`}
-                    </td>
-                    <td className="px-6 py-3.5 font-mono text-neutral-600 tabular-nums">
-                      {row.singleCallF1}
-                    </td>
-                    <td className="px-6 py-3.5 font-mono text-neutral-600 tabular-nums">
-                      {row.singleCallUnsupported}
-                    </td>
-                    <td className="px-6 py-3.5 font-mono font-semibold text-neutral-900 tabular-nums">
-                      {row.careAgentsF1}
-                    </td>
-                    <td className="px-6 py-3.5 font-mono font-semibold text-neutral-900 tabular-nums">
-                      {row.careAgentsUnsupported}
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="ehr-table">
+                <thead>
+                  <tr>
+                    <th>Metric</th>
+                    <th>Single call</th>
+                    <th>Care Agents</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      {/* Failures and Fixes Log */}
-      <section>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-[22px] font-semibold tracking-tight text-neutral-900">
-            Failures and fixes
-          </h2>
-          <span className="text-[13px] text-neutral-500">
-            Track root-cause eval failures, prompt/system changes, and measured before/after score lifts.
-          </span>
-        </div>
-
-        <form onSubmit={handleAddFailureFix} className="mt-4 soft-surface p-5 space-y-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="block text-[12px] font-medium text-neutral-600 mb-1">
-                What failed
-              </label>
-              <input
-                type="text"
-                value={whatFailed}
-                onChange={(e) => setWhatFailed(e.target.value)}
-                placeholder="e.g., C05 incomplete ZIP parsed as 10400"
-                className="w-full rounded-xl border border-black/[0.1] bg-white px-3.5 py-2 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
-              />
+                </thead>
+                <tbody>
+                  {(isEditing ? draftMetrics : metrics).map((row, idx) => (
+                    <tr key={row.key}>
+                      <td className="font-medium text-slate-900">{row.label}</td>
+                      <td className="font-mono text-[13.5px] text-slate-600 tabular-nums">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={row.singleCall}
+                            onChange={(e) => updateCell(idx, 'singleCall', e.target.value)}
+                            className="w-full max-w-[200px] rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[13.5px]"
+                          />
+                        ) : (
+                          row.singleCall
+                        )}
+                      </td>
+                      <td className="font-mono text-[13.5px] font-semibold text-slate-900 tabular-nums">
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={row.careAgents}
+                            onChange={(e) => updateCell(idx, 'careAgents', e.target.value)}
+                            className="w-full max-w-[200px] rounded-lg border border-[#2B6CB0] bg-white px-2.5 py-1 text-[13.5px]"
+                          />
+                        ) : (
+                          row.careAgents
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <div>
-              <label className="block text-[12px] font-medium text-neutral-600 mb-1">
-                What I changed
-              </label>
-              <input
-                type="text"
-                value={whatChanged}
-                onChange={(e) => setWhatChanged(e.target.value)}
-                placeholder="e.g., Require 5 digits cleanly else route to unclear[]"
-                className="w-full rounded-xl border border-black/[0.1] bg-white px-3.5 py-2 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
-              />
-            </div>
-          </div>
+          </section>
 
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-3">
-              <div>
-                <label className="block text-[12px] font-medium text-neutral-600 mb-1">
-                  Before score
-                </label>
+          {/* Self-Check Stress Test */}
+          <section className="calm-card overflow-hidden">
+            <div className="ehr-section-header flex-wrap">
+              <span>Can the self-check catch bad referrals?</span>
+              <button
+                type="button"
+                onClick={onRunStressTest}
+                disabled={isRunningStressTest || isRunningEval}
+                className="ehr-btn-primary py-1.5 px-3 text-[13px]"
+              >
+                {isRunningStressTest ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Running...
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-3.5 w-3.5 fill-current" />
+                    Run stress test
+                  </>
+                )}
+              </button>
+            </div>
+
+            {stressTestResult ? (
+              <div className="p-4 space-y-4">
+                <div className="soft-surface px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-[13.5px]">
+                  <span className="font-semibold text-[#1F3A5F]">
+                    Caught {stressTestResult.caughtCount} of {stressTestResult.plantedTotal} planted errors,{' '}
+                    {stressTestResult.controlsKeptCount} of {stressTestResult.controlsTotal} controls kept
+                  </span>
+                  <span className="font-mono text-[12.5px] text-slate-500 tabular-nums">
+                    {stressTestResult.durationSeconds}s
+                  </span>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="ehr-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Referral</th>
+                        <th>Planted error</th>
+                        <th>Outcome</th>
+                        <th>Evidence quote</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stressTestResult.cases.map((item) => {
+                        const isMiss = item.errorType !== 'control' && item.outcome === 'Verified';
+                        const outcomeColor =
+                          item.outcome === 'Rejected'
+                            ? 'text-[#C53030]'
+                            : item.outcome === 'Hours corrected from source'
+                              ? 'text-[#2B6CB0]'
+                              : item.outcome === 'Call to confirm'
+                                ? 'text-[#D97706]'
+                                : isMiss
+                                  ? 'text-[#C53030]'
+                                  : 'text-[#15803D]';
+                        return (
+                          <tr key={item.id}>
+                            <td className="font-mono text-[13px] font-semibold text-slate-600 tabular-nums">
+                              {item.id}
+                            </td>
+                            <td>
+                              <div className="font-semibold text-slate-900">{item.referralName}</div>
+                              <div className="text-[12.5px] text-slate-500">{item.claimedAddress}</div>
+                            </td>
+                            <td className="text-[13.5px] text-slate-700">{item.plantedError}</td>
+                            <td className={`font-semibold text-[13px] whitespace-nowrap ${outcomeColor}`}>
+                              {item.outcome}
+                              {isMiss ? ' (Miss)' : ''}
+                            </td>
+                            <td className="text-[13px] text-slate-600 max-w-md">
+                              {item.evidenceQuote ? `"${item.evidenceQuote}"` : 'None'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="p-5 text-[14px] text-slate-600">
+                15 seeded bad referrals (wrong hours, wrong address, closed day) plus 5 untouched controls. Click Run stress test to run live checks.
+              </div>
+            )}
+          </section>
+
+          {/* D3 Run Trend Chart */}
+          <EvalTrendChart
+            runs={runHistory}
+            isRunningEval={isRunningEval}
+            onRunFullEval={() => onStartEval(1)}
+            onClearHistory={onClearRunHistory}
+          />
+
+          {/* Input Type Breakdown */}
+          <section className="calm-card overflow-hidden">
+            <div className="ehr-section-header">
+              <span>Breakdown by input type</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="ehr-table">
+                <thead>
+                  <tr>
+                    <th>Input type</th>
+                    <th>Cases</th>
+                    <th>Single call F1</th>
+                    <th>Single call unsupported</th>
+                    <th>Care Agents F1</th>
+                    <th>Care Agents unsupported</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {formatBreakdown.map((row) => (
+                    <tr key={row.format}>
+                      <td className="font-semibold text-slate-900">{row.label}</td>
+                      <td className="font-mono text-[13px] text-slate-600 tabular-nums">
+                        {row.count > 0
+                          ? row.count
+                          : `${TEST_CASES.filter((t) => t.expectedFormat === row.format).length} queued`}
+                      </td>
+                      <td className="font-mono text-[13px] text-slate-600 tabular-nums">
+                        {row.singleCallF1}
+                      </td>
+                      <td className="font-mono text-[13px] text-slate-600 tabular-nums">
+                        {row.singleCallUnsupported}
+                      </td>
+                      <td className="font-mono text-[13px] font-semibold text-slate-900 tabular-nums">
+                        {row.careAgentsF1}
+                      </td>
+                      <td className="font-mono text-[13px] font-semibold text-slate-900 tabular-nums">
+                        {row.careAgentsUnsupported}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* Failures & Fixes Log */}
+          <section className="calm-card p-5 space-y-4">
+            <h2 className="text-[16px] font-semibold text-slate-900">Failures and fixes</h2>
+            <form onSubmit={handleAddFailureFix} className="soft-surface p-4 space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <input
                   type="text"
-                  value={beforeScore}
-                  onChange={(e) => setBeforeScore(e.target.value)}
-                  placeholder="e.g., 85%"
-                  className="w-36 rounded-xl border border-black/[0.1] bg-white px-3.5 py-2 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
+                  value={whatFailed}
+                  onChange={(e) => setWhatFailed(e.target.value)}
+                  placeholder="What failed"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[14px]"
                 />
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-neutral-600 mb-1">
-                  After score
-                </label>
                 <input
                   type="text"
-                  value={afterScore}
-                  onChange={(e) => setAfterScore(e.target.value)}
-                  placeholder="e.g., 100%"
-                  className="w-36 rounded-xl border border-black/[0.1] bg-white px-3.5 py-2 text-[14px] text-neutral-900 focus:border-[#0071E3] focus:outline-none"
+                  value={whatChanged}
+                  onChange={(e) => setWhatChanged(e.target.value)}
+                  placeholder="What changed"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[14px]"
                 />
               </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={!whatFailed.trim() || !whatChanged.trim()}
-              className="ehr-btn-primary"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Log fix
-            </button>
-          </div>
-        </form>
-
-        <div className="mt-4 grid gap-3">
-          {failuresAndFixes.map((entry) => (
-            <div
-              key={entry.id}
-              className="card-surface p-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-            >
-              <div className="space-y-1">
-                <div className="text-[14px] font-semibold text-neutral-900">
-                  Failed: <span className="font-normal text-neutral-700">{entry.whatFailed}</span>
-                </div>
-                <div className="text-[14px] font-semibold text-neutral-900">
-                  Change: <span className="font-normal text-neutral-700">{entry.whatChanged}</span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-4 shrink-0">
-                <div className="text-right font-mono text-[13px] tabular-nums">
-                  <div className="text-neutral-500">Before: {entry.beforeScore}</div>
-                  <div className="font-semibold text-emerald-700">After: {entry.afterScore}</div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="text"
+                    value={beforeScore}
+                    onChange={(e) => setBeforeScore(e.target.value)}
+                    placeholder="Before"
+                    className="w-32 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[14px]"
+                  />
+                  <input
+                    type="text"
+                    value={afterScore}
+                    onChange={(e) => setAfterScore(e.target.value)}
+                    placeholder="After"
+                    className="w-32 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[14px]"
+                  />
                 </div>
                 <button
-                  type="button"
-                  onClick={() => handleDeleteFix(entry.id)}
-                  className="rounded-full p-2 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700"
-                  aria-label="Remove failure log entry"
+                  type="submit"
+                  disabled={!whatFailed.trim() || !whatChanged.trim()}
+                  className="ehr-btn-primary"
                 >
-                  <Trash2 className="h-4 w-4" />
+                  <Plus className="h-4 w-4" />
+                  Log fix
                 </button>
               </div>
-            </div>
-          ))}
-        </div>
-      </section>
+            </form>
 
-      {/* Test Cases C01 to C20 */}
-      <section>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-[22px] font-semibold tracking-tight text-neutral-900">
-            Test cases (C01 to C20)
-          </h2>
-          <span className="text-[13px] text-neutral-500">
-            Each case uses its loaded media file if uploaded, otherwise its text.
-          </span>
-        </div>
-
-        <div className="mt-5 grid gap-3">
-          {TEST_CASES.map((tc) => {
-            const media = loadedMedia[tc.id];
-            const res = caseResults[tc.id];
-
-            return (
-              <div key={tc.id} className="card-surface p-4 sm:px-6 sm:py-5 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-[13px] font-semibold text-[#0071E3] tabular-nums">
-                        {tc.id}
-                      </span>
-                      <span aria-hidden="true" className="text-neutral-300">
-                        ·
-                      </span>
-                      <h3 className="text-[15px] font-semibold text-neutral-900">{tc.title}</h3>
-                      <span aria-hidden="true" className="text-neutral-300">
-                        ·
-                      </span>
-                      {media ? (
-                        <span className="inline-flex items-center gap-1 text-[12.5px] font-medium text-emerald-700">
-                          {media.mode === 'photo' ? (
-                            <FileImage className="h-3.5 w-3.5" />
-                          ) : (
-                            <FileAudio className="h-3.5 w-3.5" />
-                          )}
-                          Input: {media.fileName}
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveMedia(tc.id)}
-                            className="ml-1 text-neutral-400 hover:text-neutral-700"
-                            aria-label={`Remove ${media.fileName}`}
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[12.5px] text-neutral-500">
-                          <FileText className="h-3.5 w-3.5" />
-                          Input: Text{tc.expectedFormat !== 'text' ? ` (${tc.expectedFormat} fallback)` : ''}
-                        </span>
-                      )}
-
-                      {res && typeof res.consistentDomains === 'boolean' ? (
-                        <span
-                          className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                            res.consistentDomains
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                              : 'bg-amber-50 text-amber-800 border border-amber-200'
-                          }`}
-                        >
-                          {res.consistentDomains ? '2/2 consistent' : 'Varied across runs'}
-                        </span>
-                      ) : null}
-                    </div>
-
-                    <p className="mt-1 text-[13.5px] text-neutral-600">{tc.description}</p>
-                    <p className="mt-2 rounded-lg bg-[#F5F5F7] px-3 py-2 text-[13px] text-neutral-700 font-mono break-words">
-                      {tc.text}
-                    </p>
+            <div className="divide-y divide-slate-100">
+              {failuresAndFixes.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="py-3 flex flex-wrap items-center justify-between gap-4"
+                >
+                  <div className="space-y-0.5 text-[14px]">
+                    <div className="font-semibold text-slate-900">{entry.whatFailed}</div>
+                    <div className="text-slate-600">{entry.whatChanged}</div>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => onRunTestCase(tc)}
-                    className="ehr-btn-primary self-start"
-                  >
-                    <Play className="h-3.5 w-3.5 fill-current" />
-                    Run live
-                  </button>
+                  <div className="flex items-center gap-4 shrink-0">
+                    <span className="font-mono text-[13px] tabular-nums text-slate-600">
+                      {entry.beforeScore} -&gt;{' '}
+                      <strong className="text-[#15803D]">{entry.afterScore}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdateFailuresAndFixes(failuresAndFixes.filter((f) => f.id !== entry.id))
+                      }
+                      className="text-slate-400 hover:text-slate-700"
+                      aria-label="Delete fix"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
+              ))}
+            </div>
+          </section>
 
-                {/* Per-case Pass / Fail Breakdown */}
-                {res ? (
-                  <div className="border-t border-black/[0.06] pt-3 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-[12px] text-neutral-500">
-                      <span>Evaluated using {res.inputLabel}</span>
-                      <span className="font-mono tabular-nums">
-                        Care Agents {res.careAgents.durationSeconds}s | Single call {res.singleCall.durationSeconds}s
-                      </span>
+          {/* 20 Test Cases */}
+          <section className="space-y-4">
+            <h2 className="calm-heading">Test cases (C01 to C20)</h2>
+            <div className="grid gap-4">
+              {TEST_CASES.map((tc) => {
+                const media = loadedMedia[tc.id];
+                const res = caseResults[tc.id];
+
+                return (
+                  <div key={tc.id} className="calm-card p-4 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <span className="font-mono text-[13px] font-semibold text-[#2B6CB0]">
+                            {tc.id}
+                          </span>
+                          <span className="font-semibold text-[15px] text-slate-900">
+                            {tc.title}
+                          </span>
+                          {media ? (
+                            <span className="inline-flex items-center gap-1 text-[12.5px] font-medium text-[#15803D]">
+                              {media.mode === 'photo' ? (
+                                <FileImage className="h-3.5 w-3.5" />
+                              ) : (
+                                <FileAudio className="h-3.5 w-3.5" />
+                              )}
+                              {media.fileName}
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveMedia(tc.id)}
+                                className="ml-1 text-slate-400 hover:text-slate-700"
+                                aria-label="Remove media"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-[12.5px] text-slate-500">
+                              <FileText className="h-3.5 w-3.5" />
+                              Text
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-[13.5px] text-slate-600 truncate">{tc.text}</p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => onRunTestCase(tc)}
+                        className="ehr-btn-secondary py-1.5 px-3 text-[13px]"
+                      >
+                        <Play className="h-3.5 w-3.5 fill-current" />
+                        Run live
+                      </button>
                     </div>
 
-                    <div className="grid gap-3 md:grid-cols-2">
-                      {/* Care Agents checks */}
-                      <div className="rounded-xl bg-[#F5F5F7]/75 p-3">
-                        <div className="text-[12px] font-semibold text-neutral-900 mb-2">
-                          Care Agents
-                        </div>
-                        <div className="space-y-1.5">
+                    {res ? (
+                      <div className="border-t border-slate-100 pt-3 grid gap-3 md:grid-cols-2 text-[13px]">
+                        <div className="soft-surface p-3 space-y-1">
+                          <div className="font-semibold text-slate-900">
+                            Care Agents ({res.careAgents.durationSeconds}s)
+                          </div>
                           {res.careAgents.checks.map((chk, i) => (
-                            <div key={i} className="flex items-start gap-2 text-[12.5px]">
+                            <div key={i} className="flex items-start gap-2">
                               <span
-                                className={`mt-0.5 inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-semibold ${
-                                  chk.passed
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-red-100 text-red-800'
+                                className={`font-semibold ${
+                                  chk.passed ? 'text-[#15803D]' : 'text-[#C53030]'
                                 }`}
                               >
                                 {chk.passed ? 'Pass' : 'Fail'}
                               </span>
-                              <span className="text-neutral-700">
-                                <span className="font-medium text-neutral-900">{chk.name}:</span>{' '}
-                                {chk.reason}
+                              <span className="text-slate-700">
+                                {chk.name}: {chk.reason}
                               </span>
                             </div>
                           ))}
                         </div>
-                      </div>
 
-                      {/* Single Call checks */}
-                      <div className="rounded-xl bg-[#F5F5F7]/75 p-3">
-                        <div className="text-[12px] font-semibold text-neutral-700 mb-2">
-                          Single call
-                        </div>
-                        <div className="space-y-1.5">
+                        <div className="soft-surface p-3 space-y-1">
+                          <div className="font-semibold text-slate-700">
+                            Single call ({res.singleCall.durationSeconds}s)
+                          </div>
                           {res.singleCall.checks.map((chk, i) => (
-                            <div key={i} className="flex items-start gap-2 text-[12.5px]">
+                            <div key={i} className="flex items-start gap-2">
                               <span
-                                className={`mt-0.5 inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-semibold ${
-                                  chk.passed
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-red-100 text-red-800'
+                                className={`font-semibold ${
+                                  chk.passed ? 'text-[#15803D]' : 'text-[#C53030]'
                                 }`}
                               >
                                 {chk.passed ? 'Pass' : 'Fail'}
                               </span>
-                              <span className="text-neutral-700">
-                                <span className="font-medium text-neutral-900">{chk.name}:</span>{' '}
-                                {chk.reason}
+                              <span className="text-slate-700">
+                                {chk.name}: {chk.reason}
                               </span>
                             </div>
                           ))}
                         </div>
                       </div>
-                    </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          </section>
         </div>
-      </section>
-    </motion.div>
+      ) : null}
+    </div>
   );
 };

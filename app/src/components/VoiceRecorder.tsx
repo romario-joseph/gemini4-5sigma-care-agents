@@ -105,9 +105,9 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         const barH = Math.max(6, norm * (height - 8));
         const x = i * (barWidth + gap);
         const y = (height - barH) / 2;
-        ctx.fillStyle = norm > 0.15 ? '#0071E3' : '#93C5FD';
+        ctx.fillStyle = norm > 0.15 ? '#2B6CB0' : '#93C5FD';
         ctx.beginPath();
-        ctx.roundRect(x, y, barWidth, barH, 3);
+        ctx.roundRect(x, y, barWidth, barH, 2);
         ctx.fill();
       }
 
@@ -205,30 +205,30 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   };
 
   return (
-    <div className="rounded-[14px] bg-[#F5F5F7] p-5">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3.5">
+    <div className="rounded-[3px] border border-slate-300 bg-[#F8FAFC] p-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+        <div className="flex items-center gap-3">
           {!isRecording ? (
             <button
               type="button"
               onClick={startRecording}
-              className="inline-flex items-center gap-2 rounded-full bg-[#0071E3] px-5 py-2.5 text-[14px] font-medium text-white transition hover:bg-[#0062C4] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0071E3] focus-visible:ring-offset-2 whitespace-nowrap"
+              className="ehr-btn-primary"
             >
-              <Mic className="h-4 w-4" />
+              <Mic className="h-3.5 w-3.5" />
               Record voice note
             </button>
           ) : (
             <button
               type="button"
               onClick={stopRecording}
-              className="inline-flex items-center gap-2 rounded-full bg-red-600 px-5 py-2.5 text-[14px] font-medium text-white transition hover:bg-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-600 focus-visible:ring-offset-2 whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 rounded-[3px] bg-[#C53030] border border-[#9B2C2C] px-3 py-1 text-[12px] font-semibold text-white hover:bg-[#9B2C2C] whitespace-nowrap"
             >
-              <Square className="h-3.5 w-3.5 fill-current" />
+              <Square className="h-3 w-3 fill-current" />
               Stop recording
             </button>
           )}
 
-          <span className="font-mono text-[15px] font-medium text-neutral-700 tabular-nums">
+          <span className="font-mono text-[13px] font-semibold text-slate-700 tabular-nums">
             {formatDuration(elapsedSeconds)}
           </span>
         </div>
@@ -245,7 +245,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isRecording}
-            className="inline-flex items-center gap-1.5 rounded-full border border-black/[0.1] bg-white px-4 py-2 text-[13px] font-medium text-neutral-700 transition hover:bg-neutral-50 disabled:opacity-50 whitespace-nowrap"
+            className="ehr-btn-secondary"
           >
             <Upload className="h-3.5 w-3.5" />
             Upload audio
@@ -253,26 +253,26 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl bg-white px-4 py-3 border border-black/[0.05]">
+      <div className="mt-2.5 rounded-[2px] bg-white px-3 py-2 border border-slate-200">
         <canvas
           ref={canvasRef}
           width={560}
-          height={48}
-          className="h-12 w-full"
+          height={40}
+          className="h-10 w-full"
           aria-label="Live audio waveform"
         />
       </div>
 
       {audioDataUrl && !isRecording ? (
-        <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl bg-white p-3 border border-black/[0.06]">
-          <audio controls src={audioDataUrl} className="h-9 w-full sm:max-w-md" />
+        <div className="mt-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-[2px] bg-white p-2 border border-slate-200">
+          <audio controls src={audioDataUrl} className="h-8 w-full sm:max-w-md" />
           <button
             type="button"
             onClick={() => {
               onAudioChange(null, null);
               setElapsedSeconds(0);
             }}
-            className="inline-flex items-center justify-center gap-1.5 rounded-full px-3.5 py-1.5 text-[13px] font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 transition whitespace-nowrap"
+            className="ehr-btn-secondary"
           >
             <Trash2 className="h-3.5 w-3.5" />
             Remove
@@ -281,7 +281,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       ) : null}
 
       {micError ? (
-        <p className="mt-3 text-[13px] text-red-600">{micError}</p>
+        <p className="mt-2 text-[12px] text-red-700">{micError}</p>
       ) : null}
     </div>
   );

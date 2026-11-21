@@ -1,6 +1,7 @@
 import type {
   BuiltInResource,
   EvalMetricRow,
+  FollowUpItem,
   PipelineResult,
   SingleCallResult,
   TestCase,
@@ -101,13 +102,13 @@ export const BUILT_IN_RESOURCES: BuiltInResource[] = [
   {
     name: 'HRA One Shot Deal (Emergency Rent & Utility Help)',
     domain: 'housing',
-    address: 'ACCESS HRA online',
+    address: 'ACCESS HRA online / NYC HRA',
     borough: 'NYC',
     zip: '10001',
     phone: '718-557-1399',
     hours: 'ACCESS HRA online 24/7; InfoLine Mon to Fri 8:30 AM to 5:00 PM',
     eligibility: 'NYC residents facing eviction, rent arrears, or utility shutoff.',
-    source_url: 'https://a069-access.nyc.gov/accesshra/',
+    source_url: 'https://www.nyc.gov/site/hra/help/cash-assistance.page',
     languages: ['English', 'Spanish', 'French', 'Russian', 'Chinese', 'Haitian Creole'],
     openSaturday: true,
     open247: true,
@@ -115,13 +116,13 @@ export const BUILT_IN_RESOURCES: BuiltInResource[] = [
   {
     name: 'HEAP (Home Energy Assistance Program)',
     domain: 'utilities',
-    address: 'ACCESS HRA online',
+    address: 'NYC HRA Energy Assistance / ACCESS HRA online',
     borough: 'NYC',
     zip: '10001',
     phone: '718-557-1399',
-    hours: 'ACCESS HRA online 24/7; InfoLine Mon to Fri 8:30 AM to 5:00 PM',
+    hours: 'ACCESS HRA online 24/7; HRA InfoLine Mon to Fri 8:30 AM to 5:00 PM',
     eligibility: 'Income-eligible NYC households needing heating or utility shutoff relief.',
-    source_url: 'https://a069-access.nyc.gov/accesshra/',
+    source_url: 'https://www.nyc.gov/site/hra/help/energy-assistance.page',
     languages: ['English', 'Spanish', 'French', 'Russian', 'Chinese', 'Haitian Creole'],
     openSaturday: true,
     open247: true,
@@ -342,6 +343,24 @@ export const DEFAULT_EVAL_METRICS: EvalMetricRow[] = [
     label: 'Referrals rejected by self-check',
     singleCall: '0 (not checked)',
     careAgents: '4 rejected',
+  },
+  {
+    key: 'official_db_found',
+    label: 'Found in official NYC data',
+    singleCall: 'Pending run',
+    careAgents: 'Pending run',
+  },
+  {
+    key: 'official_address_match',
+    label: 'Address matches official record',
+    singleCall: 'Pending run',
+    careAgents: 'Pending run',
+  },
+  {
+    key: 'carbon_escalations',
+    label: 'Escalated to Gemini 4 Carbon',
+    singleCall: '0 (single model)',
+    careAgents: 'Pending run',
   },
   {
     key: 'avg_seconds',
@@ -677,7 +696,12 @@ export const DEMO_C01_RESULT: PipelineResult = {
       hours: 'Thu to Sat, 10:00 AM to 2:00 PM',
       eligibility: 'Open to NYC households; bring photo ID and proof of address if available (no one turned away on first visit).',
       source_url: 'https://nycommonpantry.org/programs/nourish/',
-      source_title: 'New York Common Pantry: Nourish / Choice Pantry',
+      source_title: 'Official NYC listing (Facilities Database, updated 2026-11-20)',
+      official_listing: true,
+      dataset_id: 'ji82-xba5',
+      dataset_name: 'Facilities Database',
+      dataset_updated: '2026-11-20',
+      dataset_url: 'https://data.cityofnewyork.us/d/ji82-xba5',
       why_matches:
         'Located directly in ZIP 10459 and open Saturdays 10:00 AM to 2:00 PM, fitting Maria’s weekday work schedule (until 4:00 PM).',
       verified: true,
@@ -751,7 +775,12 @@ export const DEMO_C01_RESULT: PipelineResult = {
       hours: 'Sat 8:30 AM to 4:30 PM (Mon to Fri 8:30 AM to 4:30 PM)',
       eligibility: 'Pediatric and adult primary care regardless of insurance status, ability to pay, or immigration status; accepts Medicaid.',
       source_url: 'https://www.nychealthandhospitals.org/locations/gotham-health-tremont/',
-      source_title: 'NYC Health + Hospitals: Gotham Health, Tremont',
+      source_title: 'Official NYC listing (Facilities Database, updated 2026-11-20)',
+      official_listing: true,
+      dataset_id: 'ji82-xba5',
+      dataset_name: 'Facilities Database',
+      dataset_updated: '2026-11-20',
+      dataset_url: 'https://data.cityofnewyork.us/d/ji82-xba5',
       why_matches:
         'Offers Saturday pediatric appointments (8:30 AM to 4:30 PM) near 10459 and serves patients whether Medicaid is confirmed or unconfirmed.',
       verified: true,
@@ -796,7 +825,183 @@ export const DEMO_C01_RESULT: PipelineResult = {
   outreachDraft:
     'Hola Maria, para comida este sabado vaya a NY Common Pantry (1290 Hoe Ave, Bronx 10459), abierto sabados 10am a 2pm. Para el pediatra el sabado: Gotham Health Tremont (1920 Webster Ave, sab 8:30am a 4:30pm, 1-844-692-4692).',
   durationSeconds: 3.1,
+  escalatedToCarbon: true,
+  escalationReason: '1 unclear item (Needs rent help (crossed out on form; note says ok now))',
+  modelTrace: [
+    {
+      id: 'demo-trace-1',
+      step: 'Intake extraction (text)',
+      model: 'gemini-4-hydrogen',
+      tools: ['Structured output'],
+      durationMs: 620,
+      inputTokens: 418,
+      outputTokens: 215,
+    },
+    {
+      id: 'demo-trace-2',
+      step: 'Escalated to Gemini 4 Carbon: 1 unclear item (Needs rent help (crossed out on form; note says ok now))',
+      model: 'gemini-4-carbon',
+      tools: ['Structured output'],
+      durationMs: 980,
+      inputTokens: 418,
+      outputTokens: 238,
+      escalated: true,
+      note: '1 unclear item (Needs rent help (crossed out on form; note says ok now))',
+    },
+    {
+      id: 'demo-trace-3',
+      step: 'Verify food referrals',
+      model: 'gemini-4-neon',
+      tools: ['Google Search'],
+      durationMs: 1140,
+      inputTokens: 1380,
+      outputTokens: 420,
+    },
+    {
+      id: 'demo-trace-4',
+      step: 'Verify utilities referrals',
+      model: 'gemini-4-neon',
+      tools: ['Google Search'],
+      durationMs: 1090,
+      inputTokens: 1290,
+      outputTokens: 390,
+    },
+    {
+      id: 'demo-trace-5',
+      step: 'Verify clinic referrals',
+      model: 'gemini-4-neon',
+      tools: ['Google Search'],
+      durationMs: 1180,
+      inputTokens: 1410,
+      outputTokens: 410,
+    },
+    {
+      id: 'demo-trace-6',
+      step: 'Self-check audit: New York Common Pantry, Choice Pantry',
+      model: 'gemini-4-hydrogen',
+      tools: ['Structured output'],
+      durationMs: 490,
+      inputTokens: 1640,
+      outputTokens: 132,
+    },
+    {
+      id: 'demo-trace-7',
+      step: 'Self-check audit: Con Edison Payment & Bill Assistance',
+      model: 'gemini-4-hydrogen',
+      tools: ['Structured output'],
+      durationMs: 510,
+      inputTokens: 1720,
+      outputTokens: 140,
+    },
+    {
+      id: 'demo-trace-8',
+      step: 'Self-check audit: Crotona SNAP Center',
+      model: 'gemini-4-hydrogen',
+      tools: ['Structured output'],
+      durationMs: 470,
+      inputTokens: 1510,
+      outputTokens: 128,
+      note: 'Rejected: weekday-only hours conflict with Saturday availability',
+    },
+    {
+      id: 'demo-trace-9',
+      step: 'Draft outreach message (Spanish)',
+      model: 'gemini-4-hydrogen',
+      tools: ['None'],
+      durationMs: 390,
+      inputTokens: 310,
+      outputTokens: 84,
+    },
+  ],
 };
+
+export function createDemoCompletedFollowUp(opts?: {
+  patientFirstName?: string;
+  referralName?: string;
+  referralAddress?: string;
+  referralHours?: string;
+  referralUrl?: string;
+  language?: string;
+  constraints?: string[];
+  referrals?: Array<{ name: string; address: string; hours: string; source_url: string }>;
+}): FollowUpItem {
+  const dueDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+  const formattedDate = dueDate.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
+  const checkedAt = new Date().toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+
+  const name = opts?.referralName || 'New York Common Pantry, Choice Pantry (Bronx)';
+  const address = opts?.referralAddress || '1290 Hoe Ave, Bronx, NY 10459';
+  const hours = opts?.referralHours || 'Thu to Sat, 10:00 AM to 2:00 PM';
+  const url = opts?.referralUrl || 'https://nycommonpantry.org/programs/nourish/';
+  const patientFirstName = opts?.patientFirstName || 'Maria';
+  const language = opts?.language || 'Spanish';
+  const isSpanish = language.toLowerCase().includes('span');
+
+  return {
+    id: `fu-demo-${Date.now()}`,
+    patientFirstName,
+    referralName: name,
+    referralAddress: address,
+    referralHours: hours,
+    referralUrl: url,
+    referrals: opts?.referrals || [
+      {
+        name,
+        address,
+        hours,
+        source_url: url,
+      },
+    ],
+    constraints: opts?.constraints || ['Works until 4:00 PM weekdays; available Saturdays'],
+    language,
+    dueDateIso: dueDate.toISOString(),
+    dueLabel: `Due in 3 days (${formattedDate})`,
+    status: 'Verified open',
+    agentStatus: 'Done',
+    interactionId: `demo-session-${Date.now().toString(36)}`,
+    environmentId: 'remote-demo-offline',
+    usedFallback: false,
+    structuredByHydrogen: false,
+    lastCheckedAt: checkedAt,
+    agentSummary: `Verified ${name} (${address}) remains open on Saturday (${hours}) with no closure notices posted. Drafted a check-in SMS in ${language}.`,
+    verificationDetails: `Verified open on Saturday (${hours}). No closure or holiday interruption reported on official listing.`,
+    evidenceQuote: `Choice Pantry: 1290 Hoe Ave, Bronx, NY 10459. Distribution hours: Thursday to Saturday, 10:00 AM - 2:00 PM.`,
+    latestSourceUrl: url,
+    checkInMessage: isSpanish
+      ? `Hola ${patientFirstName}, pudiste visitar ${name} este sabado? Confirmamos que sigue abierto (${hours}). Responde si necesitas otra opcion.`
+      : `Hi ${patientFirstName}, were you able to visit ${name}? We confirmed hours remain ${hours}. Reply if you need another option.`,
+    agentSteps: [
+      {
+        id: 'demo-step-1',
+        type: 'status',
+        label: 'Started Follow-up agent (Gemini Managed Agent, Demo offline replay)',
+      },
+      {
+        id: 'demo-step-2',
+        type: 'tool',
+        label: 'Opened source URL via URL context',
+        detail: url,
+      },
+      {
+        id: 'demo-step-3',
+        type: 'thought',
+        label: 'Checked Saturday schedule compatibility and closure notices',
+        detail: `Confirmed ${hours} fits patient constraint (available Saturdays).`,
+      },
+      {
+        id: 'demo-step-4',
+        type: 'done',
+        label: 'Managed Agent finished (Verified open)',
+      },
+    ],
+  };
+}
 
 export const DEMO_C01_SINGLE_CALL: SingleCallResult = {
   durationSeconds: 2.8,

@@ -1,13 +1,11 @@
 export type TabId =
   | 'overview'
-  | 'intake'
-  | 'chart_review'
-  | 'sdoh'
-  | 'referrals'
-  | 'outreach'
-  | 'followups'
+  | 'patient'
   | 'resources'
+  | 'followups'
   | 'eval';
+
+export type PatientStep = 1 | 2 | 3 | 4;
 
 export type InputMode = 'photo' | 'voice' | 'text';
 
@@ -26,6 +24,7 @@ export interface IntakeNeed {
   urgency: 1 | 2 | 3;
   summary: string;
   evidence_quote: string;
+  updatedByCarbon?: boolean;
 }
 
 export interface IntakeExtraction {
@@ -82,6 +81,22 @@ export interface ReferralItem {
   evidence_quote?: string;
   rejection_reason?: string;
   checks?: ReferralChecks;
+  foundInOfficialDb?: boolean;
+  officialAddressMatches?: boolean;
+  officialMatchedName?: string;
+  officialMatchedAddress?: string;
+}
+
+export interface ModelTraceEntry {
+  id: string;
+  step: string;
+  model: string;
+  tools: string[];
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  escalated?: boolean;
+  note?: string;
 }
 
 export interface TimelineStep {
@@ -98,6 +113,11 @@ export interface PipelineResult {
   rejectedReferrals: ReferralItem[];
   outreachDraft: string;
   durationSeconds: number;
+  modelTrace?: ModelTraceEntry[];
+  escalatedToCarbon?: boolean;
+  escalationReason?: string;
+  carbonJobId?: string;
+  carbonPending?: boolean;
 }
 
 export interface SingleCallReferral {
@@ -111,6 +131,10 @@ export interface SingleCallReferral {
   issues: string[];
   rejected: boolean;
   evidence_quote?: string;
+  foundInOfficialDb?: boolean;
+  officialAddressMatches?: boolean;
+  officialMatchedName?: string;
+  officialMatchedAddress?: string;
 }
 
 export interface SingleCallResult {
@@ -171,6 +195,9 @@ export interface EvalSideSummary {
   referralsWithSource: number;
   referralsUnsupported: number;
   referralsRejected: number;
+  officialDbFoundCount?: number;
+  officialAddressMatchCount?: number;
+  escalatedToCarbon?: boolean;
   durationSeconds: number;
   predictedDomains: NeedDomain[];
   checks: EvalCheckResult[];
@@ -185,6 +212,35 @@ export interface EvalCaseResult {
   singleCall: EvalSideSummary;
   careAgents: EvalSideSummary;
   consistentDomains?: boolean;
+}
+
+export type StressErrorType = 'wrong_hours' | 'wrong_address' | 'closed_day' | 'control';
+
+export interface StressTestCaseResult {
+  id: string;
+  referralName: string;
+  domain: NeedDomain;
+  claimedAddress: string;
+  claimedHours: string;
+  sourceUrl: string;
+  datasetName?: string;
+  errorType: StressErrorType;
+  plantedError: string;
+  outcome: 'Rejected' | 'Hours corrected from source' | 'Call to confirm' | 'Verified';
+  caught: boolean;
+  controlKept: boolean;
+  evidenceQuote: string;
+  verificationNote: string;
+}
+
+export interface StressTestRunResponse {
+  cases: StressTestCaseResult[];
+  caughtCount: number;
+  plantedTotal: number;
+  controlsKeptCount: number;
+  controlsTotal: number;
+  durationSeconds: number;
+  ranAtIso: string;
 }
 
 export interface EvalRunHistoryEntry {

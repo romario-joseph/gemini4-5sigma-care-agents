@@ -8,6 +8,7 @@ import type {
   NeedDomain,
   PipelineResult,
   SingleCallReferral,
+  StressTestRunResponse,
   TestCase,
   VerificationOutcome,
 } from '../types.ts';
@@ -127,11 +128,14 @@ function scoreSide(
     not_verified_live?: boolean;
     verified?: boolean;
     verification_outcome?: VerificationOutcome;
+    foundInOfficialDb?: boolean;
+    officialAddressMatches?: boolean;
   }>,
   rejectedCount: number,
   durationSeconds: number,
   extraText: string,
-  isCareAgentsSide: boolean
+  isCareAgentsSide: boolean,
+  escalatedToCarbon?: boolean
 ): EvalSideSummary {
   const checks: EvalCheckResult[] = [];
   const predictedDomains: NeedDomain[] = Array.from(
@@ -256,6 +260,9 @@ function scoreSide(
     return Boolean(r.rejected);
   }).length;
 
+  const officialDbFoundCount = referrals.filter((r) => Boolean(r.foundInOfficialDb)).length;
+  const officialAddressMatchCount = referrals.filter((r) => Boolean(r.officialAddressMatches)).length;
+
   if (referralsTotal > 0) {
     checks.push({
       name: 'Sources',
@@ -278,6 +285,9 @@ function scoreSide(
     referralsWithSource,
     referralsUnsupported,
     referralsRejected: rejectedCount,
+    officialDbFoundCount,
+    officialAddressMatchCount,
+    escalatedToCarbon: Boolean(escalatedToCarbon),
     durationSeconds,
     predictedDomains,
     checks,
@@ -304,7 +314,8 @@ export function scoreEvalCase(
     careAgentsRes.rejectedReferrals.length,
     careAgentsRes.durationSeconds,
     careAgentsRes.outreachDraft,
-    true
+    true,
+    careAgentsRes.escalatedToCarbon
   );
 
   const singleCall = scoreSide(
@@ -314,6 +325,7 @@ export function scoreEvalCase(
     0,
     singleCallRes.durationSeconds,
     singleCallRes.rawAnswer || '',
+    false,
     false
   );
 
@@ -353,6 +365,9 @@ export function aggregateEvalMetrics(results: EvalCaseResult[]): EvalMetricRow[]
     const sourcedRefs = sides.reduce((acc, s) => acc + s.referralsWithSource, 0);
     const unsupportedRefs = sides.reduce((acc, s) => acc + s.referralsUnsupported, 0);
     const rejectedRefs = sides.reduce((acc, s) => acc + s.referralsRejected, 0);
+    const officialDbFound = sides.reduce((acc, s) => acc + (s.officialDbFoundCount || 0), 0);
+    const officialAddrMatch = sides.reduce((acc, s) => acc + (s.officialAddressMatchCount || 0), 0);
+    const carbonEscalations = sides.filter((s) => Boolean(s.escalatedToCarbon)).length;
     const avgSec =
       sides.length > 0
         ? (sides.reduce((acc, s) => acc + s.durationSeconds, 0) / sides.length).toFixed(1) + 's'
@@ -378,6 +393,18 @@ export function aggregateEvalMetrics(results: EvalCaseResult[]): EvalMetricRow[]
           ? `${Math.round((unsupportedRefs / totalRefs) * 100)}% (${unsupportedRefs}/${totalRefs})`
           : '0 (0/0)',
       rejected: sideKey === 'singleCall' ? '0 (not checked)' : String(rejectedRefs),
+      officialDbFound:
+        totalRefs > 0
+          ? `${Math.round((officialDbFound / totalRefs) * 100)}% (${officialDbFound}/${totalRefs})`
+          : 'N/A',
+      officialAddressMatch:
+        totalRefs > 0
+          ? `${Math.round((officialAddrMatch / totalRefs) * 100)}% (${officialAddrMatch}/${totalRefs})`
+          : 'N/A',
+      carbonEscalations:
+        sideKey === 'singleCall'
+          ? '0 (single model)'
+          : `${carbonEscalations} / ${sides.length}`,
       avgSec,
     };
   };
@@ -396,6 +423,9 @@ export function aggregateEvalMetrics(results: EvalCaseResult[]): EvalMetricRow[]
     { key: 'referrals_call_to_confirm', label: 'Call to confirm referrals', singleCall: sc.callToConfirm, careAgents: ca.callToConfirm },
     { key: 'hallucinated_unsupported', label: 'Hallucinated or unsupported referrals', singleCall: sc.unsupported, careAgents: ca.unsupported },
     { key: 'referrals_rejected', label: 'Referrals rejected by self-check', singleCall: sc.rejected, careAgents: ca.rejected },
+    { key: 'official_db_found', label: 'Found in official NYC data', singleCall: sc.officialDbFound, careAgents: ca.officialDbFound },
+    { key: 'official_address_match', label: 'Address matches official record', singleCall: sc.officialAddressMatch, careAgents: ca.officialAddressMatch },
+    { key: 'carbon_escalations', label: 'Escalated to Gemini 4 Carbon', singleCall: sc.carbonEscalations, careAgents: ca.carbonEscalations },
     { key: 'avg_seconds', label: 'Average seconds', singleCall: sc.avgSec, careAgents: ca.avgSec },
   ];
 }
@@ -506,7 +536,11 @@ function csvEscape(val: string): string {
   return s;
 }
 
-export function buildCsvExport(metrics: EvalMetricRow[], caseResults: EvalCaseResult[]): string {
+export function buildCsvExport(
+  metrics: EvalMetricRow[],
+  caseResults: EvalCaseResult[],
+  stressTestResult?: StressTestRunResponse | null
+): string {
   const lines: string[] = [];
   lines.push('Metric,Single call,Care Agents');
   for (const row of metrics) {
@@ -555,10 +589,44 @@ export function buildCsvExport(metrics: EvalMetricRow[], caseResults: EvalCaseRe
     }
   }
 
+  if (stressTestResult) {
+    lines.push('');
+    lines.push(
+      `Self-Check Stress Test Summary,"Caught ${stressTestResult.caughtCount} of ${stressTestResult.plantedTotal} planted errors, ${stressTestResult.controlsKeptCount} of ${stressTestResult.controlsTotal} controls kept"`
+    );
+    lines.push('ID,Referral,Planted Error,Outcome,Result,Evidence Quote');
+    for (const sc of stressTestResult.cases) {
+      const verdict =
+        sc.errorType === 'control'
+          ? sc.controlKept
+            ? 'Control kept'
+            : 'False positive'
+          : sc.caught
+            ? 'Caught'
+            : 'Missed';
+      lines.push(
+        [
+          sc.id,
+          sc.referralName,
+          sc.plantedError,
+          sc.outcome,
+          verdict,
+          sc.evidenceQuote,
+        ]
+          .map(csvEscape)
+          .join(',')
+      );
+    }
+  }
+
   return lines.join('\n');
 }
 
-export function buildMarkdownExport(metrics: EvalMetricRow[], caseResults: EvalCaseResult[]): string {
+export function buildMarkdownExport(
+  metrics: EvalMetricRow[],
+  caseResults: EvalCaseResult[],
+  stressTestResult?: StressTestRunResponse | null
+): string {
   const out: string[] = [];
   out.push('# Care Agents Evaluation Results');
   out.push('');
@@ -592,6 +660,24 @@ export function buildMarkdownExport(metrics: EvalMetricRow[], caseResults: EvalC
       const scSummary = c.singleCall.error || c.singleCall.checks.map((ch) => `${ch.name}: ${ch.passed ? 'Pass' : 'Fail'}`).join(', ');
       out.push(
         `| ${c.caseId} | ${c.inputLabel} | ${caPass ? 'Pass' : 'Fail'} (${caSummary}) | ${scPass ? 'Pass' : 'Fail'} (${scSummary}) | ${c.careAgents.durationSeconds}s / ${c.singleCall.durationSeconds}s |`
+      );
+    }
+  }
+
+  if (stressTestResult) {
+    out.push('');
+    out.push('## Can the self-check catch bad referrals?');
+    out.push('');
+    out.push(
+      `Caught ${stressTestResult.caughtCount} of ${stressTestResult.plantedTotal} planted errors, ${stressTestResult.controlsKeptCount} of ${stressTestResult.controlsTotal} controls kept (${stressTestResult.durationSeconds}s).`
+    );
+    out.push('');
+    out.push('| ID | Referral | Planted error | Outcome | Evidence quote |');
+    out.push('| --- | --- | --- | --- | --- |');
+    for (const sc of stressTestResult.cases) {
+      const safeQuote = (sc.evidenceQuote || '').replace(/\|/g, '/').replace(/\n/g, ' ');
+      out.push(
+        `| ${sc.id} | ${sc.referralName} | ${sc.plantedError} | ${sc.outcome} | ${safeQuote} |`
       );
     }
   }

@@ -6,6 +6,8 @@ import type {
   NeedDomain,
   NycDatasetSummary,
   NycResourceRecord,
+  ReferralItem,
+  StressErrorType,
 } from './src/types.ts';
 
 const SNAPSHOT_FILE = path.resolve(process.cwd(), 'data', 'nyc_resources.json');
@@ -100,6 +102,255 @@ function cleanText(raw: unknown): string {
     .replace(/\u2013/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+const UPPERCASE_ACRONYMS = new Set([
+  'NYC',
+  'NY',
+  'USA',
+  'US',
+  'HRA',
+  'DHS',
+  'DOHMH',
+  'DOH',
+  'DSS',
+  'SNAP',
+  'WIC',
+  'FQHC',
+  'SDA',
+  'YMCA',
+  'YWCA',
+  'JCC',
+  'CUNY',
+  'SUNY',
+  'HIV',
+  'AIDS',
+  'LGBTQ',
+  'LGBT',
+  'VA',
+  'ID',
+  'LLC',
+  'PC',
+  'MD',
+  'RN',
+  'DO',
+  'PS',
+  'IS',
+  'MS',
+  'HS',
+  'II',
+  'III',
+  'IV',
+  'VI',
+  'NE',
+  'NW',
+  'SE',
+  'SW',
+  'CHN',
+  'UHP',
+  'HHC',
+  'HEAP',
+  'SSI',
+  'SSD',
+  'EBT',
+  'GED',
+  'ESL',
+  'OBGYN',
+  'AME',
+  'COGIC',
+  'BVM',
+  'CCBQ',
+  'CAMBA',
+  'RISE',
+  'CBO',
+  'OMH',
+  'OASAS',
+  'PATHHSEO',
+]);
+
+const LOWERCASE_SMALL_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'as',
+  'at',
+  'by',
+  'de',
+  'del',
+  'el',
+  'en',
+  'for',
+  'in',
+  'la',
+  'las',
+  'los',
+  'of',
+  'on',
+  'or',
+  'the',
+  'to',
+  'y',
+]);
+
+const CHURCH_PANTRY_RE =
+  /\b(church|parish|ministry|ministries|tabernacle|cathedral|chapel|baptist|methodist|lutheran|episcopal|presbyterian|pentecostal|adventist|sda|iglesia|templo|temple|mosque|synagogue|congregation|gospel|fellowship|assembly of god)\b/i;
+
+const ALREADY_FOOD_LABEL_RE =
+  /\b(food pantry|pantry|soup kitchen|food bank|food program|community kitchen)\b/i;
+
+function isMostlyUppercase(text: string): boolean {
+  const letters = text.match(/[A-Za-z]/g);
+  if (!letters || letters.length < 3) return false;
+  const upperCount = letters.filter((ch) => ch >= 'A' && ch <= 'Z').length;
+  return upperCount / letters.length >= 0.72;
+}
+
+function titleCaseToken(token: string, isBoundary: boolean): string {
+  if (!token) return token;
+
+  // Handle slash or hyphen compound tokens recursively
+  if (token.includes('/') && token.length > 1) {
+    return token
+      .split('/')
+      .map((part) => titleCaseToken(part, true))
+      .join('/');
+  }
+  if (token.includes('-') && token.length > 1) {
+    return token
+      .split('-')
+      .map((part, idx) => titleCaseToken(part, idx === 0))
+      .join('-');
+  }
+
+  const m = token.match(/^([^A-Za-z0-9]*)([A-Za-z0-9'.&]+)([^A-Za-z0-9]*)$/);
+  if (!m) return token;
+  const [, lead, core, trail] = m;
+
+  // Ordinals like 1ST, 2ND, 3RD, 163RD
+  const ordMatch = core.match(/^(\d+)(ST|ND|RD|TH)$/i);
+  if (ordMatch) {
+    return `${lead}${ordMatch[1]}${ordMatch[2].toLowerCase()}${trail}`;
+  }
+
+  const strippedAlpha = core.replace(/\./g, '').toUpperCase();
+  if (strippedAlpha === 'SVCS') {
+    return `${lead}Services${trail}`;
+  }
+  if (strippedAlpha === 'SVC') {
+    return `${lead}Service${trail}`;
+  }
+  if (strippedAlpha === 'CTR') {
+    return `${lead}Center${trail}`;
+  }
+  if (UPPERCASE_ACRONYMS.has(strippedAlpha)) {
+    return `${lead}${core.toUpperCase()}${trail}`;
+  }
+
+  const lower = core.toLowerCase();
+  if (!isBoundary && LOWERCASE_SMALL_WORDS.has(lower)) {
+    return `${lead}${lower}${trail}`;
+  }
+
+  // Handle apostrophes (e.g. ST. MARY'S, CHILDREN'S, O'CONNOR)
+  if (lower.includes("'")) {
+    const parts = lower.split("'");
+    const formatted = parts
+      .map((p, idx) => {
+        if (!p) return '';
+        if (idx > 0 && p.length <= 2) return p; // 's, 't, 're
+        return p[0].toUpperCase() + p.slice(1);
+      })
+      .join("'");
+    return `${lead}${formatted}${trail}`;
+  }
+
+  // Handle Mc prefix (e.g. MCDONALD -> McDonald)
+  if (/^mc[a-z]{2,}/.test(lower)) {
+    return `${lead}Mc${lower[2].toUpperCase()}${lower.slice(3)}${trail}`;
+  }
+
+  return `${lead}${lower[0].toUpperCase()}${lower.slice(1)}${trail}`;
+}
+
+export function toSmartTitleCase(raw: string, preserveMiddleInitials: boolean = false): string {
+  const cleaned = cleanText(raw);
+  if (!cleaned) return '';
+  if (!isMostlyUppercase(cleaned)) return cleaned;
+
+  const words = cleaned.split(' ');
+  return words
+    .map((word, idx) => {
+      const prev = idx > 0 ? words[idx - 1] : '';
+      const isBoundary =
+        idx === 0 ||
+        idx === words.length - 1 ||
+        /[:\-/(]$/.test(prev) ||
+        /^[(]/.test(word) ||
+        (preserveMiddleInitials && /^[A-Z]\.?$/.test(word));
+      return titleCaseToken(word, isBoundary);
+    })
+    .join(' ');
+}
+
+function dedupeRepeatedNameSegments(raw: string): string {
+  const cleaned = cleanText(raw);
+  if (!cleaned) return '';
+
+  const normSeg = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .trim();
+
+  // Deduplicate colon or pipe separated segments like "FOO : FOO"
+  if (cleaned.includes(':') || cleaned.includes('|')) {
+    const parts = cleaned
+      .split(/\s*[:|]\s*/)
+      .map((p) => cleanText(p))
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const part of parts) {
+      const key = normSeg(part);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      unique.push(part);
+    }
+    if (unique.length > 0) {
+      return unique.join(': ');
+    }
+  }
+
+  // Deduplicate exact "A - A" or "A / A" repetitions
+  const dashParts = cleaned.split(/\s+-\s+/).map((p) => cleanText(p)).filter(Boolean);
+  if (dashParts.length === 2 && normSeg(dashParts[0]) === normSeg(dashParts[1])) {
+    return dashParts[0];
+  }
+
+  return cleaned;
+}
+
+export function formatNycResourceName(
+  rawName: string,
+  domain: NeedDomain,
+  subtype?: string
+): string {
+  const deduped = dedupeRepeatedNameSegments(rawName);
+  if (!deduped) return '';
+  const titled = toSmartTitleCase(deduped);
+
+  const isFoodPantrySite =
+    domain === 'food' && !/snap center|child meal/i.test(subtype || '');
+
+  if (
+    isFoodPantrySite &&
+    CHURCH_PANTRY_RE.test(titled) &&
+    !ALREADY_FOOD_LABEL_RE.test(titled)
+  ) {
+    return `Food pantry at ${titled}`;
+  }
+
+  return titled;
 }
 
 function cleanZip(raw: unknown): string {
@@ -248,6 +499,19 @@ function buildIndices(records: NycResourceRecord[], datasets: NycDatasetSummary[
   };
 
   for (const r of records) {
+    r.name = formatNycResourceName(r.name, r.domain, r.subtype);
+    if (r.address) {
+      r.address = toSmartTitleCase(r.address, true);
+    }
+    if (r.subtype) {
+      r.subtype = toSmartTitleCase(r.subtype);
+    }
+    if (
+      r.source_dataset_id === '9d9t-bmk7' &&
+      r.website_url === 'https://www.nyc.gov/site/hra/locations/benefits-access-centers.page'
+    ) {
+      r.website_url = 'https://www.nyc.gov/site/hra/locations/job-locations-and-service-centers.page';
+    }
     domainCounts[r.domain] = (domainCounts[r.domain] || 0) + 1;
     if (r.zip) {
       const prev = zipAcc.get(r.zip) || { latSum: 0, lngSum: 0, count: 0 };
@@ -367,19 +631,21 @@ async function fetchAndBuildFromNycOpenData(): Promise<SnapshotPayload> {
     const zip = cleanZip(row.zipcode);
     const borough = normalizeBorough(row.boro || row.city, zip);
     const factype = cleanText(row.factype);
-    const subtype = mapping.subtypeOverride
-      ? factype && !mapping.subtypeOverride.toLowerCase().includes(factype.toLowerCase())
-        ? `${mapping.subtypeOverride} (${factype})`
-        : mapping.subtypeOverride
-      : factype || facsubgrp;
+    const subtype = toSmartTitleCase(
+      mapping.subtypeOverride
+        ? factype && !mapping.subtypeOverride.toLowerCase().includes(factype.toLowerCase())
+          ? `${mapping.subtypeOverride} (${factype})`
+          : mapping.subtypeOverride
+        : factype || facsubgrp
+    );
 
     upsertRecord({
       id: `ji82-${cleanText(row.uid) || dedupMap.size + 1}`,
-      name,
+      name: formatNycResourceName(name, mapping.domain, subtype),
       domain: mapping.domain,
       domains: [mapping.domain],
       subtype,
-      address,
+      address: toSmartTitleCase(address, true),
       zip,
       borough,
       lat: coords.lat,
@@ -459,7 +725,7 @@ async function fetchAndBuildFromNycOpenData(): Promise<SnapshotPayload> {
       source_dataset_id: '9d9t-bmk7',
       source_dataset_name: 'Directory of Benefits Access Centers',
       source_url: 'https://data.cityofnewyork.us/d/9d9t-bmk7',
-      website_url: 'https://www.nyc.gov/site/hra/locations/benefits-access-centers.page',
+      website_url: 'https://www.nyc.gov/site/hra/locations/job-locations-and-service-centers.page',
       dataset_updated: bacUpdated,
     });
   });
@@ -714,6 +980,29 @@ export interface RankedNycCandidate {
   hasPhoneAndHours: boolean;
 }
 
+const MAX_MATCH_RADIUS_KM = 3.22; // 2 miles
+
+const MENTAL_HEALTH_NEED_RE =
+  /\b(mental|therap|depress|anxiet|counsel|psych|substance|addict|behavioral|behavioural|crisis|suicid|rehab|detox|trauma|grief)\b/i;
+
+const SCHOOL_MEAL_NEED_RE =
+  /\b(school meal|school lunch|free lunch|summer meal|summer food|school breakfast)\b/i;
+
+const CLINIC_EXCLUDE_RE =
+  /\b(behavioral health|mental health|substance|omh|oasas|adolescent|youth|skills center|career development|afterschool|after school|beacon|cornerstone|summer camp|church|ministry|ministries|temple|mosque|synagogue|parish|cathedral|tabernacle|chapel|school based|school-based|high school|middle school|elementary school|intermediate school|charter school|academy|pre-k|head start|day care|daycare|child care|childcare|dialysis|mobile|medical van|nursing home|adult day|home care|hospice|senior life|managed long term)\b|\b(p\.?s\.?|i\.?s\.?|m\.?s\.?|h\.?s\.?)\s*\/?\s*\d+/i;
+
+const CLINIC_PRIMARY_TIER3_RE =
+  /\b(fqhc|family health|pediatric|primary care|community health|community healthcare|urban health plan|la casa de salud|morris heights|union community|gotham health|nyc health \+ hospitals|health \+ hospitals|montefiore|bronxcare|lincoln medical|bellevue|elmhurst hospital|kings county|harlem hospital|jacobi|woodhull|metropolitan hospital|south bronx health|diagnostic and treatment center|hospital extension clinic|general hospital)\b/i;
+
+const CLINIC_PRIMARY_TIER2_RE =
+  /\b(health center|medical center|medical practice|clinic|hospital|care center|health collective)\b/i;
+
+const FOOD_CHILD_OR_SCHOOL_RE =
+  /\b(child meal|summer only|feeding site|summer camp|nyc parks|usda community eligibility|school|p\.?s\.?\s*\d+|i\.?s\.?\s*\d+|m\.?s\.?\s*\d+|high school|academy)\b/i;
+
+const FOOD_PANTRY_PRIORITY_RE =
+  /\b(food pantry|soup kitchen|snap center|food bank|common pantry|community kitchen)\b/i;
+
 export function rankNycResourcesForNeed(
   need: IntakeNeed,
   intake: IntakeExtraction,
@@ -725,59 +1014,106 @@ export function rankNycResourcesForNeed(
   const patientZip = cleanZip(intake.zip);
   const patientLang = cleanText(intake.language).toLowerCase();
   const center = resolvePatientCenter(intake);
+  const needText = `${need.summary || ''} ${need.evidence_quote || ''}`;
+  const wantsMentalHealth = domain === 'clinic' && MENTAL_HEALTH_NEED_RE.test(needText);
+  const wantsSchoolMeals = domain === 'food' && SCHOOL_MEAL_NEED_RE.test(needText);
 
-  const filtered = cachedRecords.filter(
-    (r) => r.domain === domain || r.domains.includes(domain)
-  );
-  if (filtered.length === 0) return [];
+  const filtered = cachedRecords.filter((r) => {
+    if (r.domain !== domain && !r.domains.includes(domain)) return false;
 
-  const scored = filtered.map((r) => {
-    const distKm = center ? haversineKm(center.lat, center.lng, r.lat, r.lng) : null;
-    const serviceAreaHit = Boolean(
-      patientZip && r.service_area_zips && r.service_area_zips.includes(patientZip)
-    );
-    const languageMatched = Boolean(
-      patientLang &&
-        patientLang !== 'english' &&
-        patientLang !== 'unknown' &&
-        r.languages.some((l) => l.toLowerCase().includes(patientLang))
-    );
-    const hasPhone = Boolean(r.phone);
-    const hasHours = Boolean(r.hours);
-    const hasPhoneAndHours = hasPhone && hasHours;
+    const combinedMeta = `${r.name} ${r.subtype} ${r.operator} ${r.agency}`;
 
-    // Slight boost if Homebase explicitly serves the patient's ZIP
-    const effectiveDist =
-      distKm === null
-        ? 999
-        : serviceAreaHit
-          ? Math.max(0, distKm - 0.5)
-          : distKm;
+    if (domain === 'clinic') {
+      const isBehavioral = /behavioral health|mental health|substance|omh|oasas/i.test(
+        `${r.subtype} ${r.agency}`
+      );
+      if (wantsMentalHealth) {
+        if (!isBehavioral && !/psych|mental|counsel|behavioral/i.test(r.name)) return false;
+      } else {
+        if (isBehavioral) return false;
+        if (CLINIC_EXCLUDE_RE.test(combinedMeta)) return false;
+      }
+    }
 
-    // Quantize distance to 0.1 km (~100m NYC block) so language & contact info break nearby ties cleanly
-    const distBucket = Math.round(effectiveDist * 10) / 10;
+    if (domain === 'food' && !wantsSchoolMeals) {
+      const isChildOrSchool = FOOD_CHILD_OR_SCHOOL_RE.test(`${r.subtype} ${r.name}`);
+      const isRealPantry = FOOD_PANTRY_PRIORITY_RE.test(`${r.subtype} ${r.name}`);
+      if (isChildOrSchool && !isRealPantry) return false;
+    }
 
-    return {
-      record: r,
-      distanceKm: distKm !== null ? Number(distKm.toFixed(2)) : null,
-      languageMatched,
-      hasPhoneAndHours,
-      sortKey: {
-        distBucket,
-        exactDist: effectiveDist,
-        langScore: languageMatched ? 1 : 0,
-        contactScore: (hasPhoneAndHours ? 2 : hasPhone || hasHours ? 1 : 0),
-        // Slight preference for adult/household food pantries over school-only Child meal site unless child/family noted
-        pantryBonus:
-          domain === 'food' &&
-          r.subtype.toLowerCase().includes('child meal')
-            ? 0
-            : 1,
-      },
-    };
+    return true;
   });
 
+  if (filtered.length === 0) return [];
+
+  const scored = filtered
+    .map((r) => {
+      const distKm = center ? haversineKm(center.lat, center.lng, r.lat, r.lng) : null;
+      const serviceAreaHit = Boolean(
+        patientZip && r.service_area_zips && r.service_area_zips.includes(patientZip)
+      );
+
+      // Enforce 2-mile radius cap when patient location is known
+      if (distKm !== null && distKm > MAX_MATCH_RADIUS_KM && !serviceAreaHit) {
+        return null;
+      }
+
+      const languageMatched = Boolean(
+        patientLang &&
+          patientLang !== 'english' &&
+          patientLang !== 'unknown' &&
+          r.languages.some((l) => l.toLowerCase().includes(patientLang))
+      );
+      const hasPhone = Boolean(r.phone);
+      const hasHours = Boolean(r.hours);
+      const hasPhoneAndHours = hasPhone && hasHours;
+
+      const combinedMeta = `${r.name} ${r.subtype} ${r.operator}`;
+      let qualityTier = 1;
+      if (domain === 'clinic' && !wantsMentalHealth) {
+        if (CLINIC_PRIMARY_TIER3_RE.test(combinedMeta)) {
+          qualityTier = 3;
+        } else if (CLINIC_PRIMARY_TIER2_RE.test(combinedMeta)) {
+          qualityTier = 2;
+        } else {
+          qualityTier = 0;
+        }
+      } else if (domain === 'food' && !wantsSchoolMeals) {
+        qualityTier = FOOD_PANTRY_PRIORITY_RE.test(`${r.subtype} ${r.name}`) ? 3 : 1;
+      }
+
+      const effectiveDist =
+        distKm === null
+          ? 999
+          : serviceAreaHit
+            ? Math.max(0, distKm - 0.4)
+            : distKm;
+
+      // Quantize distance to 0.4 km so higher clinical/pantry quality wins within the same neighborhood
+      const distBucket = Math.round(effectiveDist / 0.4) * 0.4;
+
+      return {
+        record: r,
+        distanceKm: distKm !== null ? Number(distKm.toFixed(2)) : null,
+        languageMatched,
+        hasPhoneAndHours,
+        sortKey: {
+          qualityTier,
+          distBucket,
+          exactDist: effectiveDist,
+          langScore: languageMatched ? 1 : 0,
+          contactScore: hasPhoneAndHours ? 2 : hasPhone || hasHours ? 1 : 0,
+        },
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
+
+  if (scored.length === 0) return [];
+
   scored.sort((a, b) => {
+    if (a.sortKey.qualityTier !== b.sortKey.qualityTier) {
+      return b.sortKey.qualityTier - a.sortKey.qualityTier;
+    }
     if (a.sortKey.distBucket !== b.sortKey.distBucket) {
       return a.sortKey.distBucket - b.sortKey.distBucket;
     }
@@ -786,9 +1122,6 @@ export function rankNycResourcesForNeed(
     }
     if (a.sortKey.contactScore !== b.sortKey.contactScore) {
       return b.sortKey.contactScore - a.sortKey.contactScore;
-    }
-    if (a.sortKey.pantryBonus !== b.sortKey.pantryBonus) {
-      return b.sortKey.pantryBonus - a.sortKey.pantryBonus;
     }
     return a.sortKey.exactDist - b.sortKey.exactDist;
   });
@@ -851,4 +1184,500 @@ export function queryNycResources(params: {
     datasets: cachedDatasets,
     domainCounts: cachedDomainCounts,
   };
+}
+
+const NAME_STOP_WORDS = new Set([
+  'the',
+  'of',
+  'and',
+  'for',
+  'at',
+  'in',
+  'on',
+  'to',
+  'a',
+  'an',
+  'inc',
+  'llc',
+  'corp',
+  'nyc',
+  'new',
+  'york',
+  'city',
+  'center',
+  'clinic',
+  'hospital',
+  'program',
+  'services',
+  'service',
+  'office',
+  'community',
+  'health',
+  'food',
+  'pantry',
+]);
+
+function normalizeNameText(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractNameTokens(raw: string): string[] {
+  const tokens = normalizeNameText(raw)
+    .split(' ')
+    .filter((t) => t.length >= 2);
+  const significant = tokens.filter((t) => !NAME_STOP_WORDS.has(t));
+  return significant.length > 0 ? significant : tokens;
+}
+
+const STREET_ABBREV_MAP: Record<string, string> = {
+  st: 'street',
+  str: 'street',
+  ave: 'avenue',
+  av: 'avenue',
+  blvd: 'boulevard',
+  rd: 'road',
+  pl: 'place',
+  dr: 'drive',
+  ln: 'lane',
+  ct: 'court',
+  pkwy: 'parkway',
+  ter: 'terrace',
+  sq: 'square',
+  hwy: 'highway',
+  expwy: 'expressway',
+  e: 'east',
+  w: 'west',
+  n: 'north',
+  s: 'south',
+  ft: 'fort',
+  mt: 'mount',
+  first: '1',
+  second: '2',
+  third: '3',
+  fourth: '4',
+  fifth: '5',
+  sixth: '6',
+  seventh: '7',
+  eighth: '8',
+  ninth: '9',
+  tenth: '10',
+  '1st': '1',
+  '2nd': '2',
+  '3rd': '3',
+};
+
+function normalizeAddressCore(raw: string): {
+  fullNorm: string;
+  streetNum: string;
+  streetTokens: string[];
+} {
+  // Strip borough, state, zip, floor/suite annotations to isolate street line
+  const cleaned = raw
+    .toLowerCase()
+    .replace(/,?\s*\b(bronx|brooklyn|manhattan|queens|staten island|new york|bx|bk|ny|lic|jamaica|flushing|astoria|rockaway)\b[\s\S]*$/i, '')
+    .replace(/\b(\d+(?:st|nd|rd|th)?\s*(?:fl|flr|floor)|lower level|b-level|basement|suite|ste|apt|rm|room)\b.*$/i, '')
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const rawTokens = cleaned.split(' ').filter(Boolean);
+  const normTokens = rawTokens.map((tok) => {
+    const ordMatch = tok.match(/^(\d+)(?:st|nd|rd|th)$/);
+    if (ordMatch) return ordMatch[1];
+    return STREET_ABBREV_MAP[tok] || tok;
+  });
+
+  const streetNum = normTokens[0] && /^\d+(?:-\d+)?$/.test(normTokens[0]) ? normTokens[0] : '';
+  const streetTokens = (streetNum ? normTokens.slice(1) : normTokens).filter(
+    (t) => t.length >= 1 && t !== 'fl' && t !== 'flr' && t !== 'floor'
+  );
+
+  return {
+    fullNorm: normTokens.join(' '),
+    streetNum,
+    streetTokens,
+  };
+}
+
+function addressPairMatches(aRaw: string, bRaw: string): boolean {
+  const a = normalizeAddressCore(aRaw);
+  const b = normalizeAddressCore(bRaw);
+  if (!a.streetNum || !b.streetNum) return false;
+
+  // Handle hyphenated ranges like 2541-2549 matching 2541
+  const aBaseNum = a.streetNum.split('-')[0];
+  const bBaseNum = b.streetNum.split('-')[0];
+  const sameNum = a.streetNum === b.streetNum || aBaseNum === bBaseNum;
+  if (!sameNum) return false;
+
+  if (a.fullNorm === b.fullNorm) return true;
+  if (a.streetTokens.length === 0 || b.streetTokens.length === 0) return false;
+
+  const setB = new Set(b.streetTokens);
+  let overlap = 0;
+  for (const t of a.streetTokens) {
+    if (setB.has(t)) overlap += 1;
+  }
+  const minLen = Math.min(a.streetTokens.length, b.streetTokens.length);
+  return overlap >= Math.max(1, Math.ceil(minLen * 0.65));
+}
+
+export interface OfficialDbLookupResult {
+  found: boolean;
+  addressMatches: boolean;
+  matchedName?: string;
+  matchedAddress?: string;
+  datasetName?: string;
+}
+
+export function lookupOfficialNycResource(
+  name: string,
+  address: string
+): OfficialDbLookupResult {
+  if (cachedRecords.length === 0) {
+    return { found: false, addressMatches: false };
+  }
+  const normQueryName = normalizeNameText(name);
+  const queryTokens = extractNameTokens(name);
+  if (!normQueryName || queryTokens.length === 0) {
+    return { found: false, addressMatches: false };
+  }
+
+  let bestScore = 0;
+  let bestRecord: NycResourceRecord | null = null;
+  let bestAddrMatch = false;
+
+  for (const rec of cachedRecords) {
+    const recNameNorm = normalizeNameText(rec.name);
+    const addrMatches = Boolean(address && addressPairMatches(address, rec.address));
+
+    let nameScore = 0;
+    if (recNameNorm === normQueryName) {
+      nameScore = 1.0;
+    } else if (
+      recNameNorm.length >= 6 &&
+      normQueryName.length >= 6 &&
+      (recNameNorm.includes(normQueryName) || normQueryName.includes(recNameNorm))
+    ) {
+      nameScore = 0.88;
+    } else {
+      const recTokens = extractNameTokens(rec.name);
+      if (recTokens.length > 0) {
+        const recSet = new Set(recTokens);
+        let hits = 0;
+        for (const qt of queryTokens) {
+          if (recSet.has(qt)) hits += 1;
+        }
+        if (hits > 0) {
+          const precision = hits / queryTokens.length;
+          const recall = hits / recTokens.length;
+          const f1 = (2 * precision * recall) / (precision + recall);
+          nameScore = f1;
+        }
+      }
+    }
+
+    const combinedScore = nameScore + (addrMatches ? 0.35 : 0);
+    const isMatch =
+      nameScore >= 0.62 || (addrMatches && nameScore >= 0.32);
+
+    if (isMatch && combinedScore > bestScore) {
+      bestScore = combinedScore;
+      bestRecord = rec;
+      bestAddrMatch = addrMatches;
+    }
+  }
+
+  if (!bestRecord) {
+    return { found: false, addressMatches: false };
+  }
+
+  const fullOfficialAddr = [
+    bestRecord.address,
+    bestRecord.borough && bestRecord.borough !== 'NYC' ? bestRecord.borough : '',
+    bestRecord.zip ? `NY ${bestRecord.zip}` : 'NY',
+  ]
+    .filter(Boolean)
+    .join(', ');
+
+  return {
+    found: true,
+    addressMatches: bestAddrMatch,
+    matchedName: bestRecord.name,
+    matchedAddress: fullOfficialAddr,
+    datasetName: bestRecord.source_dataset_name,
+  };
+}
+
+export interface StressTestSeed {
+  id: string;
+  referral: ReferralItem;
+  intake: IntakeExtraction;
+  errorType: StressErrorType;
+  plantedError: string;
+}
+
+export function buildStressTestSeeds(): StressTestSeed[] {
+  const byId = new Map<string, NycResourceRecord>();
+  for (const r of cachedRecords) {
+    byId.set(r.id, r);
+  }
+
+  const getRec = (id: string): NycResourceRecord | undefined => byId.get(id);
+
+  const formatAddr = (rec: NycResourceRecord) =>
+    [rec.address, rec.borough && rec.borough !== 'NYC' ? rec.borough : '', rec.zip ? `NY ${rec.zip}` : 'NY']
+      .filter(Boolean)
+      .join(', ');
+
+  const makeSeed = (
+    seedId: string,
+    recordId: string,
+    errorType: StressErrorType,
+    plantedError: string,
+    overrides: { address?: string; hours?: string; constraints?: string[] }
+  ): StressTestSeed | null => {
+    const rec = getRec(recordId);
+    if (!rec) return null;
+
+    const cleanRealHours = 'Monday - Friday 8:30am to 5:00pm';
+    const claimedAddress = overrides.address ?? formatAddr(rec);
+    const claimedHours = overrides.hours ?? cleanRealHours;
+    const sourceUrl =
+      rec.website_url ||
+      (rec.source_dataset_id === 'tc6u-8rnp'
+        ? 'https://www.nyc.gov/site/hra/locations/snap-locations.page'
+        : 'https://www.nyc.gov/site/hra/locations/job-locations-and-service-centers.page');
+
+    const referral: ReferralItem = {
+      id: seedId,
+      need_id: `stress-need-${seedId}`,
+      domain: rec.domain,
+      name: rec.name,
+      address: claimedAddress,
+      phone: rec.phone || '718-557-1399',
+      hours: claimedHours,
+      eligibility: 'NYC residents applying for SNAP or benefits assistance.',
+      source_url: sourceUrl,
+      source_title: `Official NYC listing (${rec.source_dataset_name})`,
+      official_listing: true,
+      dataset_id: rec.source_dataset_id,
+      dataset_name: rec.source_dataset_name,
+      dataset_updated: rec.dataset_updated,
+      dataset_url: rec.source_url,
+      why_matches: `Seeded from ${rec.source_dataset_name} (${rec.id}) for self-check stress test.`,
+      verified: false,
+      verification_note: '',
+    };
+
+    const intake: IntakeExtraction = {
+      patient_first_name: 'StressTest',
+      language: 'English',
+      zip: rec.zip || '10457',
+      borough: rec.borough || 'Bronx',
+      multiple_patients: false,
+      prompt_injection_detected: false,
+      prompt_injection_reason: '',
+      medical_advice_requested: false,
+      needs: [
+        {
+          id: `stress-need-${seedId}`,
+          domain: rec.domain,
+          urgency: 2,
+          summary: `Need ${rec.domain} assistance near ${rec.zip || rec.borough}`,
+          evidence_quote: 'Needs assistance',
+        },
+      ],
+      constraints: overrides.constraints || [],
+      unclear: [],
+    };
+
+    return {
+      id: seedId,
+      referral,
+      intake,
+      errorType,
+      plantedError,
+    };
+  };
+
+  const specs: Array<{
+    id: string;
+    recordId: string;
+    errorType: StressErrorType;
+    plantedError: string;
+    overrides: { address?: string; hours?: string; constraints?: string[] };
+  }> = [
+    // 5 Wrong hours
+    {
+      id: 'ST01',
+      recordId: 'tc6u-1',
+      errorType: 'wrong_hours',
+      plantedError: 'Wrong hours: claims 6:00 AM to 9:00 PM (source: Mon-Fri 8:30am to 5:00pm)',
+      overrides: { hours: 'Monday - Friday 6:00 AM to 9:00 PM' },
+    },
+    {
+      id: 'ST02',
+      recordId: 'tc6u-2',
+      errorType: 'wrong_hours',
+      plantedError: 'Wrong hours: claims 10:00 AM to 7:00 PM (source: Mon-Fri 8:30am to 5:00pm)',
+      overrides: { hours: 'Monday - Friday 10:00 AM to 7:00 PM' },
+    },
+    {
+      id: 'ST03',
+      recordId: 'tc6u-3',
+      errorType: 'wrong_hours',
+      plantedError: 'Wrong hours: claims 11:00 AM to 8:00 PM (source: Mon-Fri 8:30am to 5:00pm)',
+      overrides: { hours: 'Monday - Friday 11:00 AM to 8:00 PM' },
+    },
+    {
+      id: 'ST04',
+      recordId: '9d9t-2',
+      errorType: 'wrong_hours',
+      plantedError: 'Wrong hours: claims 7:00 AM to 2:00 PM (source: Mon-Fri 8:30am to 5:00pm)',
+      overrides: { hours: 'Monday - Friday 7:00 AM to 2:00 PM' },
+    },
+    {
+      id: 'ST05',
+      recordId: '9d9t-7',
+      errorType: 'wrong_hours',
+      plantedError: 'Wrong hours: claims 12:00 PM to 9:00 PM (source: Mon-Fri 8:30am to 5:00pm)',
+      overrides: { hours: 'Monday - Friday 12:00 PM to 9:00 PM' },
+    },
+
+    // 5 Wrong street address
+    {
+      id: 'ST06',
+      recordId: 'tc6u-4',
+      errorType: 'wrong_address',
+      plantedError: 'Wrong address: 888 Flatbush Ave (source: 2400 Fulton Street)',
+      overrides: { address: '888 Flatbush Avenue, Brooklyn, NY 11226' },
+    },
+    {
+      id: 'ST07',
+      recordId: 'tc6u-5',
+      errorType: 'wrong_address',
+      plantedError: 'Wrong address: 450 Bedford Ave (source: 2 George Street)',
+      overrides: { address: '450 Bedford Avenue, Brooklyn, NY 11249' },
+    },
+    {
+      id: 'ST08',
+      recordId: 'tc6u-6',
+      errorType: 'wrong_address',
+      plantedError: 'Wrong address: 1450 Lexington Ave (source: 2322 Third Avenue)',
+      overrides: { address: '1450 Lexington Avenue, Manhattan, NY 10128' },
+    },
+    {
+      id: 'ST09',
+      recordId: '9d9t-10',
+      errorType: 'wrong_address',
+      plantedError: 'Wrong address: 500 West 181st St (source: 4055 10th Avenue)',
+      overrides: { address: '500 West 181st Street, Manhattan, NY 10033' },
+    },
+    {
+      id: 'ST10',
+      recordId: '9d9t-14',
+      errorType: 'wrong_address',
+      plantedError: 'Wrong address: 144-10 Hillside Ave (source: 165-08 88th Avenue)',
+      overrides: { address: '144-10 Hillside Avenue, Queens, NY 11435' },
+    },
+
+    // 5 Marked open on a day the source says closed (source is Mon-Fri only)
+    {
+      id: 'ST11',
+      recordId: 'tc6u-7',
+      errorType: 'closed_day',
+      plantedError: 'Marked open Saturdays 9am-4pm (source: Mon-Fri only, closed Saturdays)',
+      overrides: {
+        hours: 'Open Saturdays 9:00 AM to 4:00 PM',
+        constraints: ['Works Mon to Fri; available Saturdays only'],
+      },
+    },
+    {
+      id: 'ST12',
+      recordId: 'tc6u-10',
+      errorType: 'closed_day',
+      plantedError: 'Marked open Sundays 10am-3pm (source: Mon-Fri only, closed Sundays)',
+      overrides: {
+        hours: 'Open Sundays 10:00 AM to 3:00 PM',
+        constraints: ['Works Mon to Fri; available weekends only'],
+      },
+    },
+    {
+      id: 'ST13',
+      recordId: 'tc6u-12',
+      errorType: 'closed_day',
+      plantedError: 'Marked open Saturdays & Sundays 9am-5pm (source: Mon-Fri only)',
+      overrides: {
+        hours: 'Open Saturdays and Sundays 9:00 AM to 5:00 PM',
+        constraints: ['Works weekdays until 5pm; available Saturdays only'],
+      },
+    },
+    {
+      id: 'ST14',
+      recordId: '9d9t-11',
+      errorType: 'closed_day',
+      plantedError: 'Marked open Saturdays 8:30am-5pm (source: Mon-Fri only, closed Saturdays)',
+      overrides: {
+        hours: 'Open Saturdays 8:30 AM to 5:00 PM',
+        constraints: ['Works Mon to Fri; available Saturdays only'],
+      },
+    },
+    {
+      id: 'ST15',
+      recordId: '9d9t-15',
+      errorType: 'closed_day',
+      plantedError: 'Marked open Sundays 9am-2pm (source: Mon-Fri only, closed Sundays)',
+      overrides: {
+        hours: 'Open Sundays 9:00 AM to 2:00 PM',
+        constraints: ['Works weekdays full time; available weekends only'],
+      },
+    },
+
+    // 5 Untouched control referrals
+    {
+      id: 'ST16',
+      recordId: 'tc6u-11',
+      errorType: 'control',
+      plantedError: 'None (untouched official NYC record)',
+      overrides: {},
+    },
+    {
+      id: 'ST17',
+      recordId: 'tc6u-13',
+      errorType: 'control',
+      plantedError: 'None (untouched official NYC record)',
+      overrides: {},
+    },
+    {
+      id: 'ST18',
+      recordId: '9d9t-8',
+      errorType: 'control',
+      plantedError: 'None (untouched official NYC record)',
+      overrides: {},
+    },
+    {
+      id: 'ST19',
+      recordId: '9d9t-16',
+      errorType: 'control',
+      plantedError: 'None (untouched official NYC record)',
+      overrides: {},
+    },
+    {
+      id: 'ST20',
+      recordId: '9d9t-17',
+      errorType: 'control',
+      plantedError: 'None (untouched official NYC record)',
+      overrides: {},
+    },
+  ];
+
+  return specs
+    .map((s) => makeSeed(s.id, s.recordId, s.errorType, s.plantedError, s.overrides))
+    .filter((s): s is StressTestSeed => s !== null);
 }

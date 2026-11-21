@@ -4,19 +4,18 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChartAlertBar } from './components/ChartAlertBar.tsx';
-import { ChartReviewTab } from './components/ChartReviewTab.tsx';
 import { EvalTab } from './components/EvalTab.tsx';
 import { FollowUpsTab } from './components/FollowUpsTab.tsx';
 import { ActivityTabStrip, SystemBar } from './components/Header.tsx';
-import { IntakeTab, type ExternalRunPayload } from './components/IntakeTab.tsx';
-import { OutreachTab } from './components/OutreachTab.tsx';
 import { OverviewTab } from './components/OverviewTab.tsx';
-import { PatientStoryboard } from './components/PatientStoryboard.tsx';
-import { ReferralsTab } from './components/ReferralsTab.tsx';
+import { PatientWorkspace, type ExternalRunPayload } from './components/PatientWorkspace.tsx';
 import { ResourcesTab } from './components/ResourcesTab.tsx';
-import { SDOHTab } from './components/SDOHTab.tsx';
-import { DEFAULT_EVAL_METRICS, DEFAULT_FAILURE_FIXES, TEST_CASES } from './data/resources.ts';
+import {
+  createDemoCompletedFollowUp,
+  DEFAULT_EVAL_METRICS,
+  DEFAULT_FAILURE_FIXES,
+  TEST_CASES,
+} from './data/resources.ts';
 import type {
   AgentStepItem,
   EvalCaseResult,
@@ -26,11 +25,15 @@ import type {
   FailureFixEntry,
   FollowUpItem,
   InputMode,
+  IntakeExtraction,
   LoadedMediaFile,
   ManagedAgentRunStatus,
+  ModelTraceEntry,
   NeedDomain,
   PatientRecord,
+  PatientStep,
   PipelineResult,
+  StressTestRunResponse,
   TabId,
   TestCase,
 } from './types.ts';
@@ -51,7 +54,7 @@ import {
 
 const FOLLOWUPS_STORAGE_KEY = 'care_agents_followups_v2';
 const PATIENTS_STORAGE_KEY = 'care_agents_patients_v2';
-const EVAL_STORAGE_KEY = 'care_agents_eval_metrics_v4';
+const EVAL_STORAGE_KEY = 'care_agents_eval_metrics_v5';
 const EVAL_HISTORY_STORAGE_KEY = 'care_agents_eval_history_v1';
 const EVAL_COUNTER_STORAGE_KEY = 'care_agents_eval_counter_v1';
 const FIXES_STORAGE_KEY = 'care_agents_failure_fixes_v3';
@@ -75,10 +78,19 @@ interface AgentJobPollResponse {
   };
 }
 
-const PATIENT_CHART_TABS: TabId[] = ['chart_review', 'sdoh', 'referrals', 'outreach'];
+interface CarbonJobPollResponse {
+  jobId: string;
+  status: 'running' | 'done' | 'error';
+  reason: string;
+  updated: boolean;
+  intake?: IntakeExtraction;
+  traceEntry?: ModelTraceEntry;
+  error?: string;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [patientStep, setPatientStep] = useState<PatientStep>(1);
   const [demoMode, setDemoMode] = useState<boolean>(false);
 
   const [patients, setPatients] = useState<PatientRecord[]>(() => {
@@ -144,6 +156,9 @@ export default function App() {
     consistent: number;
     total: number;
   } | null>(null);
+  const [stressTestResult, setStressTestResult] = useState<StressTestRunResponse | null>(null);
+  const [isRunningStressTest, setIsRunningStressTest] = useState(false);
+  const [stressTestError, setStressTestError] = useState<string | null>(null);
 
   const evalAbortRef = useRef<AbortController | null>(null);
   const evalTimerRef = useRef<number | null>(null);
@@ -195,8 +210,66 @@ export default function App() {
     }
   }, [failuresAndFixes]);
 
+  // Background poller for non-blocking Gemini 4 Carbon double-check jobs
+  useEffect(() => {
+    if (demoMode) return;
+    const pendingPatients = patients.filter(
+      (p) => p.result.carbonJobId && p.result.carbonPending
+    );
+    if (pendingPatients.length === 0) return;
+
+    let cancelled = false;
+    const pollCarbon = async () => {
+      await Promise.all(
+        pendingPatients.map(async (pt) => {
+          const jobId = pt.result.carbonJobId;
+          if (!jobId) return;
+          try {
+            const res = await fetch(`/api/intake/carbon/${encodeURIComponent(jobId)}`);
+            if (!res.ok) return;
+            const job = (await res.json()) as CarbonJobPollResponse;
+            if (cancelled || job.status === 'running') return;
+
+            setPatients((prev) =>
+              prev.map((curr) => {
+                if (curr.id !== pt.id) return curr;
+                const nextTrace = job.traceEntry
+                  ? [...(curr.result.modelTrace || []), job.traceEntry]
+                  : curr.result.modelTrace;
+                return {
+                  ...curr,
+                  result: {
+                    ...curr.result,
+                    carbonPending: false,
+                    intake: job.status === 'done' && job.updated && job.intake
+                      ? job.intake
+                      : curr.result.intake,
+                    modelTrace: nextTrace,
+                  },
+                };
+              })
+            );
+          } catch {
+            // Retry on next interval
+          }
+        })
+      );
+    };
+
+    void pollCarbon();
+    const timer = window.setInterval(() => {
+      void pollCarbon();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [patients, demoMode]);
+
   // Background poller for active Gemini Managed Agent follow-up runs
   useEffect(() => {
+    if (demoMode) return;
     const activeJobs = followUps.filter(
       (f) => f.agentJobId && (f.agentStatus === 'Queued' || f.agentStatus === 'Running')
     );
@@ -243,7 +316,7 @@ export default function App() {
               })
             );
           } catch {
-            // Transient poll failure ignored; next interval retries
+            // Retry on next interval
           }
         })
       );
@@ -258,7 +331,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [followUps]);
+  }, [followUps, demoMode]);
 
   const samplePatients = useMemo(() => createSamplePatients(), []);
   const allChartPatients = useMemo(() => {
@@ -364,12 +437,14 @@ export default function App() {
 
   const handleSelectPatient = (patient: PatientRecord) => {
     setSelectedPatientId(patient.id);
-    setActiveTab('chart_review');
+    setActiveTab('patient');
+    setPatientStep(2);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleStartIntakeWithMode = (mode: InputMode, clearResult: boolean = false) => {
-    setActiveTab('intake');
+    setActiveTab('patient');
+    setPatientStep(1);
     setExternalRunRequest({
       mode,
       nonce: Date.now(),
@@ -394,8 +469,8 @@ export default function App() {
             {
               id: `tl-approved-${Date.now()}`,
               type: 'outreach_approved',
-              title: `Approved outreach & queued Follow-up agent (${item.referralName})`,
-              detail: `${item.dueLabel}. Follow-up agent checking live availability.`,
+              title: `Approved outreach and queued Follow-up agent (${item.referralName})`,
+              detail: `${item.dueLabel}. Managed Agent checking availability.`,
               timestampIso: new Date().toISOString(),
             },
           ],
@@ -435,6 +510,38 @@ export default function App() {
         ? patient.result.intake.language
         : 'English';
 
+    if (demoMode) {
+      const demoFollowUp = createDemoCompletedFollowUp({
+        patientFirstName: patient.name,
+        referralName: primary.name,
+        referralAddress: primary.address,
+        referralHours: primary.hours,
+        referralUrl: primary.source_url,
+        language: targetLang,
+        constraints: patient.result.intake.constraints,
+        referrals: referralsPayload,
+      });
+
+      mutateActivePatient((p) => ({
+        ...p,
+        outreachApproved: true,
+        result: { ...p.result, outreachDraft: draft },
+        timeline: [
+          ...p.timeline,
+          {
+            id: `tl-approved-${Date.now()}`,
+            type: 'outreach_approved',
+            title: `Approved outreach (${primary.name})`,
+            detail: `${demoFollowUp.dueLabel}. Verified open in Demo mode.`,
+            timestampIso: new Date().toISOString(),
+          },
+        ],
+      }));
+
+      setFollowUps((prev) => [demoFollowUp, ...prev]);
+      return;
+    }
+
     const res = await fetch('/api/followup/agent/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -460,16 +567,13 @@ export default function App() {
     mutateActivePatient((p) => ({
       ...p,
       outreachApproved: true,
-      result: {
-        ...p.result,
-        outreachDraft: draft,
-      },
+      result: { ...p.result, outreachDraft: draft },
       timeline: [
         ...p.timeline,
         {
           id: `tl-approved-${Date.now()}`,
           type: 'outreach_approved',
-          title: `Approved outreach & queued Follow-up agent (${primary.name})`,
+          title: `Approved outreach and queued Follow-up agent (${primary.name})`,
           detail: `Due in 3 days (${formattedDate}). Managed Agent checking availability.`,
           timestampIso: new Date().toISOString(),
         },
@@ -505,9 +609,7 @@ export default function App() {
   };
 
   const handleUpdateFollowUp = (id: string, patch: Partial<FollowUpItem>) => {
-    setFollowUps((prev) =>
-      prev.map((fu) => (fu.id === id ? { ...fu, ...patch } : fu))
-    );
+    setFollowUps((prev) => prev.map((fu) => (fu.id === id ? { ...fu, ...patch } : fu)));
   };
 
   const handleRunAgentForOverviewTask = async (task: {
@@ -522,6 +624,36 @@ export default function App() {
       source_url: string;
     }>;
   }) => {
+    if (demoMode) {
+      const primary = task.referrals[0];
+      const completed = createDemoCompletedFollowUp({
+        patientFirstName: task.patientFirstName,
+        referralName: primary.name,
+        referralAddress: primary.address,
+        referralHours: primary.hours,
+        referralUrl: primary.source_url,
+        language: task.language,
+        constraints: task.constraints,
+        referrals: task.referrals,
+      });
+      if (task.followUpId) {
+        handleUpdateFollowUp(task.followUpId, {
+          agentStatus: 'Done',
+          status: 'Verified open',
+          agentError: undefined,
+          usedFallback: false,
+          evidenceQuote: completed.evidenceQuote,
+          agentSummary: completed.agentSummary,
+          checkInMessage: completed.checkInMessage,
+          agentSteps: completed.agentSteps,
+          lastCheckedAt: completed.lastCheckedAt,
+        });
+      } else {
+        handleCreateFollowUp(completed);
+      }
+      return;
+    }
+
     const res = await fetch('/api/followup/agent/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -538,52 +670,32 @@ export default function App() {
       throw new Error(data.error || 'Failed to launch Managed Agent.');
     }
 
-    if (task.followUpId) {
-      handleUpdateFollowUp(task.followUpId, {
-        agentJobId: data.jobId,
-        agentStatus: 'Queued',
-        agentError: undefined,
-        usedFallback: false,
-        structuredByHydrogen: false,
-        agentSteps: [
-          {
-            id: 'queued',
-            type: 'status',
-            label: 'Queued Follow-up agent (Gemini Managed Agent)',
-          },
-        ],
-      });
-    } else {
-      const dueDate = new Date();
-      const formattedDate = dueDate.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-      });
-      const primary = task.referrals[0];
-      handleCreateFollowUp({
-        id: `fu-${Date.now()}`,
-        patientFirstName: task.patientFirstName,
-        referralName: primary.name,
-        referralAddress: primary.address,
-        referralHours: primary.hours,
-        referralUrl: primary.source_url,
-        referrals: task.referrals,
-        constraints: task.constraints,
-        language: task.language,
-        dueDateIso: dueDate.toISOString(),
-        dueLabel: `Today (${formattedDate})`,
-        status: 'Scheduled',
-        agentJobId: data.jobId,
-        agentStatus: 'Queued',
-        agentSteps: [
-          {
-            id: 'queued',
-            type: 'status',
-            label: 'Queued Follow-up agent (Gemini Managed Agent)',
-          },
-        ],
-      });
-    }
+    const dueDate = new Date();
+    const formattedDate = dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const primary = task.referrals[0];
+    handleCreateFollowUp({
+      id: `fu-${Date.now()}`,
+      patientFirstName: task.patientFirstName,
+      referralName: primary.name,
+      referralAddress: primary.address,
+      referralHours: primary.hours,
+      referralUrl: primary.source_url,
+      referrals: task.referrals,
+      constraints: task.constraints,
+      language: task.language,
+      dueDateIso: dueDate.toISOString(),
+      dueLabel: `Today (${formattedDate})`,
+      status: 'Scheduled',
+      agentJobId: data.jobId,
+      agentStatus: 'Queued',
+      agentSteps: [
+        {
+          id: 'queued',
+          type: 'status',
+          label: 'Queued Follow-up agent (Gemini Managed Agent)',
+        },
+      ],
+    });
   };
 
   const handleRecordEvalRun = (snapshot: EvalRunMetricsSnapshot) => {
@@ -654,22 +766,13 @@ export default function App() {
             signal: controller.signal,
             body: JSON.stringify(
               media
-                ? {
-                    mode: media.mode,
-                    fileData: media.dataUrl,
-                    mimeType: media.mimeType,
-                  }
-                : {
-                    mode: 'text',
-                    text: tc.text,
-                  }
+                ? { mode: media.mode, fileData: media.dataUrl, mimeType: media.mimeType }
+                : { mode: 'text', text: tc.text }
             ),
           });
 
           const data = await res.json();
-          if (!res.ok) {
-            throw new Error(data.error || `Case ${tc.id} failed (${res.status})`);
-          }
+          if (!res.ok) throw new Error(data.error || `Case ${tc.id} failed (${res.status})`);
 
           const scored = scoreEvalCase(
             tc,
@@ -692,45 +795,30 @@ export default function App() {
         } catch (err) {
           if ((err as Error).name === 'AbortError') return;
           const errMsg = err instanceof Error ? err.message : 'Case failed';
+          const failedSide = {
+            needsF1: null,
+            urgencyCorrect: null,
+            languageCorrect: null,
+            zipCorrect: null,
+            safetyPassed: null,
+            referralsTotal: 0,
+            referralsVerified: 0,
+            referralsCallToConfirm: 0,
+            referralsWithSource: 0,
+            referralsUnsupported: 0,
+            referralsRejected: 0,
+            durationSeconds: 0,
+            predictedDomains: [] as NeedDomain[],
+            checks: [{ name: 'Error', passed: false, reason: errMsg }],
+            error: errMsg,
+          };
           passMap[tc.id] = {
             caseId: tc.id,
             inputUsed,
             inputFormat,
             inputLabel,
-            careAgents: {
-              needsF1: null,
-              urgencyCorrect: null,
-              languageCorrect: null,
-              zipCorrect: null,
-              safetyPassed: null,
-              referralsTotal: 0,
-              referralsVerified: 0,
-              referralsCallToConfirm: 0,
-              referralsWithSource: 0,
-              referralsUnsupported: 0,
-              referralsRejected: 0,
-              durationSeconds: 0,
-              predictedDomains: [],
-              checks: [{ name: 'Error', passed: false, reason: errMsg }],
-              error: errMsg,
-            },
-            singleCall: {
-              needsF1: null,
-              urgencyCorrect: null,
-              languageCorrect: null,
-              zipCorrect: null,
-              safetyPassed: null,
-              referralsTotal: 0,
-              referralsVerified: 0,
-              referralsCallToConfirm: 0,
-              referralsWithSource: 0,
-              referralsUnsupported: 0,
-              referralsRejected: 0,
-              durationSeconds: 0,
-              predictedDomains: [],
-              checks: [{ name: 'Error', passed: false, reason: errMsg }],
-              error: errMsg,
-            },
+            careAgents: failedSide,
+            singleCall: { ...failedSide },
           };
         }
 
@@ -739,8 +827,7 @@ export default function App() {
         setEvalCompletedCount(
           (passNumber === 2 ? TEST_CASES.length : 0) + Object.keys(snapshot).length
         );
-        const aggregated = aggregateEvalMetrics(Object.values(snapshot));
-        setEvalMetrics(aggregated);
+        setEvalMetrics(aggregateEvalMetrics(Object.values(snapshot)));
       }
     };
 
@@ -749,6 +836,27 @@ export default function App() {
       handleRecordEvalRun(summarizeEvalRunForHistory(Object.values(passMap)));
     }
     return passMap;
+  };
+
+  const handleRunStressTest = async (signal?: AbortSignal) => {
+    setIsRunningStressTest(true);
+    setStressTestError(null);
+    try {
+      const res = await fetch('/api/eval/stress-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Stress test failed (${res.status})`);
+      setStressTestResult(data as StressTestRunResponse);
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        setStressTestError(err instanceof Error ? err.message : 'Stress test failed.');
+      }
+    } finally {
+      setIsRunningStressTest(false);
+    }
   };
 
   const handleRunFullEval = async (passes: 1 | 2) => {
@@ -783,10 +891,10 @@ export default function App() {
           (r) => typeof r.consistentDomains === 'boolean'
         );
         const consistent = evaluated.filter((r) => r.consistentDomains).length;
-        setConsistencySummary({
-          consistent,
-          total: evaluated.length,
-        });
+        setConsistencySummary({ consistent, total: evaluated.length });
+      }
+      if (!controller.signal.aborted) {
+        await handleRunStressTest(controller.signal);
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
@@ -814,11 +922,14 @@ export default function App() {
     setEvalMetrics(DEFAULT_EVAL_METRICS);
     setEvalCaseResults({});
     setConsistencySummary(null);
+    setStressTestResult(null);
+    setStressTestError(null);
   };
 
   const handleRunTestCase = (testCase: TestCase) => {
     setDemoMode(false);
-    setActiveTab('intake');
+    setActiveTab('patient');
+    setPatientStep(1);
     const media = loadedMedia[testCase.id];
     if (media) {
       setExternalRunRequest({
@@ -842,11 +953,7 @@ export default function App() {
 
   const handleAddSampleFollowUp = async () => {
     const dueDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
-    const formattedDate = dueDate.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-    });
-
+    const formattedDate = dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     const sampleReferrals = [
       {
         name: 'New York Common Pantry, Choice Pantry (Bronx)',
@@ -856,6 +963,22 @@ export default function App() {
       },
     ];
     const sampleConstraints = ['Works weekdays until 4:00 PM; available Saturdays'];
+
+    if (demoMode) {
+      handleCreateFollowUp(
+        createDemoCompletedFollowUp({
+          patientFirstName: 'Maria',
+          referralName: sampleReferrals[0].name,
+          referralAddress: sampleReferrals[0].address,
+          referralHours: sampleReferrals[0].hours,
+          referralUrl: sampleReferrals[0].source_url,
+          language: 'Spanish',
+          constraints: sampleConstraints,
+          referrals: sampleReferrals,
+        })
+      );
+      return;
+    }
 
     let agentJobId: string | undefined;
     try {
@@ -904,13 +1027,8 @@ export default function App() {
     });
   };
 
-  const isPatientChartView = PATIENT_CHART_TABS.includes(activeTab);
-  const referralCount =
-    activePatient.result.verifiedReferrals.length + activePatient.result.rejectedReferrals.length;
-  const unclearOrMissingCount = activeChart.unclearCount + activeChart.notAskedCount;
-
   return (
-    <div className="min-h-screen flex flex-col bg-[#EEF1F5] text-[#1A202C]">
+    <div className="min-h-screen flex flex-col bg-[#F5F7FA] text-[#0F172A]">
       <SystemBar
         patients={allChartPatients}
         demoMode={demoMode}
@@ -924,12 +1042,11 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         followUpCount={followUps.length}
-        referralCount={referralCount}
-        unclearOrMissingCount={unclearOrMissingCount}
+        activePatientName={activePatient.name}
         evalRunningText={isRunningEval ? `${evalCompletedCount}/${evalTotalSteps}` : null}
       />
 
-      <main className="flex-1 flex flex-col">
+      <main className="flex-1 min-w-0">
         {activeTab === 'overview' ? (
           <OverviewTab
             sessionPatients={patients}
@@ -941,71 +1058,28 @@ export default function App() {
           />
         ) : null}
 
-        {activeTab === 'intake' ? (
-          <IntakeTab
-            demoMode={demoMode}
-            externalRunRequest={externalRunRequest}
-            onCreateFollowUp={handleCreateFollowUp}
-            onNavigateFollowUps={() => setActiveTab('followups')}
+        {activeTab === 'patient' ? (
+          <PatientWorkspace
+            allPatients={allChartPatients}
+            activePatient={activePatient}
+            chart={activeChart}
+            activeStep={patientStep}
+            onStepChange={setPatientStep}
+            onSelectPatientId={setSelectedPatientId}
+            onAcknowledgeAlert={handleAcknowledgeAlert}
+            onAddQuestionToOutreach={handleAddQuestionToOutreach}
+            onUpdateOutreachDraft={handleUpdateActiveOutreachDraft}
+            onApproveAndSend={handleApproveAndSendFromOutreach}
+            onUpdateFollowUp={handleUpdateFollowUp}
             onIntakeCompleted={handleIntakeCompleted}
-            onOpenPatientChart={() => setActiveTab('chart_review')}
+            onStartNewIntake={() => handleStartIntakeWithMode('text', true)}
+            matchingFollowUps={activePatientFollowUps}
+            externalRunRequest={externalRunRequest}
+            demoMode={demoMode}
           />
         ) : null}
 
-        {isPatientChartView ? (
-          <div className="flex-1 flex flex-col lg:flex-row min-h-0">
-            <PatientStoryboard
-              allPatients={allChartPatients}
-              activePatient={activePatient}
-              chart={activeChart}
-              onSelectPatientId={setSelectedPatientId}
-              onStartNewIntake={() => handleStartIntakeWithMode('text', true)}
-            />
-
-            <div className="flex-1 min-w-0 flex flex-col">
-              <ChartAlertBar
-                alerts={activeChart.alerts}
-                acknowledgedIds={activePatient.acknowledgedAlertIds || []}
-                onAcknowledge={handleAcknowledgeAlert}
-              />
-
-              <div className="p-3 flex-1">
-                {activeTab === 'chart_review' ? (
-                  <ChartReviewTab
-                    activePatient={activePatient}
-                    chart={activeChart}
-                    followUps={followUps}
-                    onNavigateTab={setActiveTab}
-                  />
-                ) : null}
-
-                {activeTab === 'sdoh' ? (
-                  <SDOHTab
-                    chart={activeChart}
-                    outreachDraft={activePatient.result.outreachDraft}
-                    onAddQuestionToOutreach={handleAddQuestionToOutreach}
-                    onNavigateTab={setActiveTab}
-                  />
-                ) : null}
-
-                {activeTab === 'referrals' ? (
-                  <ReferralsTab activePatient={activePatient} />
-                ) : null}
-
-                {activeTab === 'outreach' ? (
-                  <OutreachTab
-                    activePatient={activePatient}
-                    chart={activeChart}
-                    onUpdateOutreachDraft={handleUpdateActiveOutreachDraft}
-                    onApproveAndSend={handleApproveAndSendFromOutreach}
-                    onNavigateTab={setActiveTab}
-                    matchingFollowUps={activePatientFollowUps}
-                  />
-                ) : null}
-              </div>
-            </div>
-          </div>
-        ) : null}
+        {activeTab === 'resources' ? <ResourcesTab /> : null}
 
         {activeTab === 'followups' ? (
           <FollowUpsTab
@@ -1013,10 +1087,9 @@ export default function App() {
             onUpdateFollowUp={handleUpdateFollowUp}
             onGoToIntake={() => handleStartIntakeWithMode('text', false)}
             onAddSampleFollowUp={() => void handleAddSampleFollowUp()}
+            demoMode={demoMode}
           />
         ) : null}
-
-        {activeTab === 'resources' ? <ResourcesTab /> : null}
 
         {activeTab === 'eval' ? (
           <EvalTab
@@ -1041,13 +1114,19 @@ export default function App() {
             onStartEval={(passes) => void handleRunFullEval(passes)}
             onStopEval={handleStopFullEval}
             onResetDefaults={handleResetEvalState}
+            stressTestResult={stressTestResult}
+            isRunningStressTest={isRunningStressTest}
+            stressTestError={stressTestError}
+            onRunStressTest={() => void handleRunStressTest()}
           />
         ) : null}
       </main>
 
-      <footer className="border-t border-slate-300 bg-white px-3 py-2 text-[11.5px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
-        <span>Romario Joseph. Built with Gemini 4 in Google AI Studio.</span>
-        <span>Synthetic data only. A person approves before anything is sent.</span>
+      <footer className="border-t border-slate-200 bg-white px-4 sm:px-6 py-3 text-[12.5px] text-slate-500">
+        <div className="mx-auto max-w-[1380px] flex flex-wrap items-center justify-between gap-2">
+          <span>Romario Joseph · Care Agents</span>
+          <span>Synthetic data only. Human approval required before outreach.</span>
+        </div>
       </footer>
     </div>
   );
