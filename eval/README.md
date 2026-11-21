@@ -6,6 +6,10 @@ Baseline: one Gemini 4 Hydrogen call. System: Hydrogen Intake Reader, then Gemin
 
 ## Run
 
+In the browser: [Open in Colab](https://colab.research.google.com/github/romario-joseph/gemini4-5sigma-care-agents/blob/main/eval/run_eval_colab.ipynb)
+
+Or locally:
+
 ```
 python eval/run_eval.py
 python eval/run_eval.py --cases C01,C09,C18

@@ -89,7 +89,10 @@ def build_input(case):
     media = find_media(case["case_id"]) if case["format"] in ("photo", "voice") else None
     instruction = "Read this intake and extract the patient's needs. Follow the system instruction."
     if media:
-        mime = mimetypes.guess_type(media.name)[0] or ("audio/mp4" if media.suffix == ".m4a" else "image/jpeg")
+        fixed = {".m4a": "audio/mp4", ".mp3": "audio/mp3", ".wav": "audio/wav", ".ogg": "audio/ogg",
+                 ".webm": "audio/webm", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                 ".webp": "image/webp", ".heic": "image/heic"}
+        mime = fixed.get(media.suffix.lower()) or mimetypes.guess_type(media.name)[0] or "image/jpeg"
         part = types.Part.from_bytes(data=media.read_bytes(), mime_type=mime)
         return [part, instruction], case["format"]
     text_used = "text_fallback" if case["format"] in ("photo", "voice") else "text"
