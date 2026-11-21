@@ -1,6 +1,6 @@
 # Care Agents
 
-Romario Joseph
+Romario Joseph. Built with Gemini 4 in Google AI Studio.
 
 I built this for community health workers. Upload a photo of a handwritten intake form or a voice note, and it returns verified NYC services for each need, with a source for every one.
 
