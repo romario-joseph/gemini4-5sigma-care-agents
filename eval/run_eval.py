@@ -1,22 +1,15 @@
 """
-5 Sigma eval: baseline (one Gemini 4 Hydrogen call) vs system
-(Gemini 4 Hydrogen intake reader, then Gemini 4 Neon verifier with Google Search).
-
+Eval: baseline vs system.
 Author: Romario Joseph
 
 Usage:
-    export GEMINI_API_KEY=...            # or put it in a .env file (never commit it)
-    python eval/run_eval.py              # all 20 cases, both systems
+    python eval/run_eval.py
     python eval/run_eval.py --cases C01,C09,C18
-    python eval/run_eval.py --no-verifier --no-url-check   # fast run, intake only
+    python eval/run_eval.py --no-verifier --no-url-check
 
-Photo and voice cases read media from eval/media/<case_id>.<ext>
-(jpg, jpeg, png, webp, heic, m4a, mp3, wav, ogg, webm). If the file is missing,
-the case falls back to its typed text and the results mark it as text_fallback.
-
-Outputs:
-    eval/results/cases_<timestamp>.csv   one row per case and system
-    eval/results/summary_<timestamp>.md  the comparison table for the README and demo
+Media for photo and voice cases goes in eval/media/<case_id>.<ext>.
+Missing files fall back to the case text.
+Results go to eval/results/.
 """
 
 import argparse
