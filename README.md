@@ -40,7 +40,7 @@ What I learned: the first self-check was too strict (1 verified, 8 rejected on C
 
 ## App
 
-The full app is in [app/](app/): React front end and an Express server (server.ts) that holds the Gemini key and runs every model call. Built in Google AI Studio Build.
+The full app is in [app/](app/): React front end and an Express server (server.ts) that holds the Gemini key and runs every model call. Built in Google AI Studio Build. The live AI Studio sync of the same code is at https://github.com/devstar2028-max/care-agents-app.
 
 ```
 cd app
