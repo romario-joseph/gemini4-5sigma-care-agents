@@ -1,0 +1,6 @@
+{
+  "name": "Care Agents",
+  "description": "Turn a messy NYC intake (photo, voice, or text) into verified community referrals in one minute.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
